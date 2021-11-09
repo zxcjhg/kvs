@@ -1,11 +1,10 @@
 use clap::{App, Arg};
 use kvs::{KvStore, KvsError, Result};
-use std::path::PathBuf;
+use std::env;
 use std::process::exit;
 
 fn main() -> Result<()> {
-    let mut kv_store = KvStore::open(PathBuf::from("")).unwrap();
-
+    let mut kv_store = KvStore::open(&env::current_dir().unwrap()).unwrap();
     let matches = App::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
         .author("nobody@gmail.com")
