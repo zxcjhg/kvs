@@ -50,7 +50,7 @@ pub struct KvStore {
     current_log: PathBuf,
 }
 
-impl<'a> KvStore {
+impl KvStore {
     /// Sets a `value` for a given `key`
     /// Overrides with new `value` if `key` already exists
 
