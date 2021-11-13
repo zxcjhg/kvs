@@ -1,5 +1,10 @@
+mod common;
+mod engine;
 mod error;
-mod kv;
+mod logger;
+mod protocol;
 
+pub use common::Result;
+pub use engine::{KvStore, KvsEngine, SledStore};
 pub use error::KvsError;
-pub use kv::{KvStore, Result};
+pub use protocol::{Command, Response, Engine};

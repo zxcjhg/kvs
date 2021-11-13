@@ -1,5 +1,4 @@
-use crate::error::KvsError;
-use serde::{Deserialize, Serialize};
+use crate::{Command, KvsEngine, KvsError, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
@@ -10,7 +9,7 @@ use std::rc::Rc;
 use std::time::SystemTime;
 
 /// 2mb log file size, after that a new file is created
-const COMP_THRESHOLD: u64 = 200000;
+const COMP_THRESHOLD: u64 = 2000000;
 /// A flag in the log filename that is not compacted, but full
 const FULL_FLAG: &str = "!";
 /// A flag in the log filename that is compacted and full
@@ -25,15 +24,6 @@ enum LogState {
     Full,
     Compacted,
 }
-
-#[derive(Serialize, Deserialize)]
-enum Command<'a> {
-    Get(&'a str),
-    Rm(&'a str),
-    Set(&'a str, &'a str),
-}
-
-pub type Result<T> = std::result::Result<T, KvsError>;
 
 struct LogPointer {
     pos: u64,
@@ -50,31 +40,27 @@ pub struct KvStore {
     current_log: PathBuf,
 }
 
-impl KvStore {
-    /// Sets a `value` for a given `key`
-    /// Overrides with new `value` if `key` already exists
-
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
+impl KvsEngine for KvStore {
+    fn set(&mut self, key: String, value: String) -> Result<()> {
         let log_position = self.current_writer.stream_position()?;
-        serde_json::to_writer(&mut self.current_writer, &Command::Set(&key, &value))?;
+        let set_cmd = Command::Set { key, value };
+        serde_json::to_writer(&mut self.current_writer, &set_cmd)?;
         self.current_writer.write_all(b"\n")?;
-        self.index.insert(
-            key,
-            RefCell::new(LogPointer {
-                pos: log_position,
-                reader: Rc::clone(&self.current_reader),
-            }),
-        );
+        if let Command::Set { key, value: _ } = set_cmd {
+            self.index.insert(
+                key,
+                RefCell::new(LogPointer {
+                    pos: log_position,
+                    reader: Rc::clone(&self.current_reader),
+                }),
+            );
+        }
         self.current_writer.flush()?;
         self.compact_logs()?;
         Ok(())
     }
-    /// Retrieves value from storage for a given `key`
-    ///
-    /// # Panics
-    ///
-    /// Panics if `key` doesn't exist.
-    pub fn get(&self, key: String) -> Result<Option<String>> {
+
+    fn get(&mut self, key: String) -> Result<Option<String>> {
         if !self.index.contains_key(&key) {
             return Ok(None);
         }
@@ -87,23 +73,24 @@ impl KvStore {
         reader.seek(SeekFrom::Start(log_position))?;
         reader.read_line(&mut temp_buffer)?;
         match serde_json::from_str(&temp_buffer)? {
-            Command::Set(_key, _value) => Ok(Some(_value.to_string())),
+            Command::Set { key: _, value } => Ok(Some(value)),
             _ => Err(KvsError::UnexpectedCommandType),
         }
     }
 
-    /// Removes a entry for a given `key`
-
-    pub fn remove(&mut self, key: String) -> Result<()> {
+    fn remove(&mut self, key: String) -> Result<()> {
         if !self.index.contains_key(&key) {
             return Err(KvsError::KeyNotFound);
         }
-        serde_json::to_writer(&mut self.current_writer, &Command::Rm(&key))?;
-        self.current_writer.write_all(b"\n")?;
         self.index.remove(&key);
+        serde_json::to_writer(&mut self.current_writer, &Command::Rm { key })?;
+        self.current_writer.write_all(b"\n")?;
         self.compact_logs()?;
         Ok(())
     }
+}
+
+impl KvStore {
     /// Builds index from all the log files
     fn build_index(filenames: &[PathBuf]) -> Result<HashMap<String, RefCell<LogPointer>>> {
         let mut index = HashMap::<String, RefCell<LogPointer>>::new();
@@ -116,14 +103,14 @@ impl KvStore {
             temp_buffer.clear();
             while reader_pointer.read_line(&mut temp_buffer)? > 0 {
                 match serde_json::from_str(&temp_buffer)? {
-                    Command::Set(_key, _value) => index.insert(
-                        _key.to_string(),
+                    Command::Set { key, value: _ } => index.insert(
+                        key,
                         RefCell::new(LogPointer {
                             pos: log_position,
                             reader: Rc::clone(&reader),
                         }),
                     ),
-                    Command::Rm(key) => index.remove(key),
+                    Command::Rm { key } => index.remove(&key),
                     _ => return Err(KvsError::UnexpectedCommandType),
                 };
                 log_position = reader_pointer.stream_position()?;
