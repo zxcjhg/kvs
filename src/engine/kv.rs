@@ -1,7 +1,7 @@
 use crate::{Command, KvsEngine, KvsError, Result};
 use bincode;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::fs::{read, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -37,7 +37,7 @@ struct LogPointer {
 /// @TODO create one buffer for reading
 pub struct KvStore {
     current_writer: BufWriter<File>,
-    index: HashMap<String, RefCell<LogPointer>>,
+    index: BTreeMap<String, RefCell<LogPointer>>,
     current_reader: Rc<RefCell<BufReader<File>>>,
     current_log: PathBuf,
 }
@@ -92,8 +92,8 @@ impl KvsEngine for KvStore {
 
 impl KvStore {
     /// Builds index from all the log files
-    fn build_index(filenames: &[PathBuf]) -> Result<HashMap<String, RefCell<LogPointer>>> {
-        let mut index = HashMap::<String, RefCell<LogPointer>>::new();
+    fn build_index(filenames: &[PathBuf]) -> Result<BTreeMap<String, RefCell<LogPointer>>> {
+        let mut index = BTreeMap::<String, RefCell<LogPointer>>::new();
 
         for filename in filenames {
             let reader = KvStore::create_file_reader(filename)?;
