@@ -59,10 +59,7 @@ fn main() -> Result<()> {
         let mut reader = BufReader::new(&stream);
         let mut writer = BufWriter::new(&stream);
 
-        let mut buffer = Vec::new();
-        reader.read_until(b'\n', &mut buffer)?;
-
-        match bincode::deserialize(&buffer) {
+        match bincode::deserialize_from(&mut reader) {
             Ok(cmd) => match cmd {
                 Command::Set { key, value } => {
                     match kv_store.set(key, value) {
@@ -105,7 +102,6 @@ fn main() -> Result<()> {
                 bincode::serialize_into(&mut writer, &Response::Err(format!("{}", err)))?;
             }
         }
-        writer.write_all(b"\n")?;
     }
 
     Ok(())

@@ -31,11 +31,8 @@ fn main() -> Result<()> {
     let mut reader = BufReader::new(&stream);
     let mut writer = BufWriter::new(&stream);
     bincode::serialize_into(&mut writer, &args.command)?;
-    writer.write_all(b"\n")?;
     writer.flush()?;
-    let mut buffer = Vec::new();
-    reader.read_until(b'\n', &mut buffer)?;
-    match bincode::deserialize(&buffer)? {
+    match bincode::deserialize_from(&mut reader)? {
         Response::Ok(s) => {
             if let Some(s) = s {
                 println!("{}", s)
