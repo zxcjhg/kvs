@@ -1,13 +1,13 @@
 use crate::{Command, KvsEngine, KvsError, Result};
+use bincode;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::fs::{read, File, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::SystemTime;
-use bincode;
 
 /// 2mb log file size, after that a new file is created
 const COMP_THRESHOLD: u64 = 2000000;
@@ -19,7 +19,6 @@ const COMP_FLAG: &str = "#";
 const WRITE_FLAG: &str = "?";
 /// Extension of a log file
 const LOG_EXT: &str = "log";
-const DELIMITER: u8 = b'\n';
 
 enum LogState {
     Write,
@@ -29,6 +28,7 @@ enum LogState {
 
 struct LogPointer {
     pos: u64,
+    size: u64,
     reader: Rc<RefCell<BufReader<File>>>,
 }
 
@@ -47,12 +47,12 @@ impl KvsEngine for KvStore {
         let log_position = self.current_writer.stream_position()?;
         let set_cmd = Command::Set { key, value };
         bincode::serialize_into(&mut self.current_writer, &set_cmd)?;
-        self.current_writer.write_all(b"\n")?;
         if let Command::Set { key, value: _ } = set_cmd {
             self.index.insert(
                 key,
                 RefCell::new(LogPointer {
                     pos: log_position,
+                    size: self.current_writer.stream_position()? - log_position,
                     reader: Rc::clone(&self.current_reader),
                 }),
             );
@@ -71,10 +71,8 @@ impl KvsEngine for KvStore {
         let current_pointer = log_pointer.borrow_mut();
         let mut reader = current_pointer.reader.borrow_mut();
         let log_position = current_pointer.pos;
-        let mut temp_buffer = Vec::with_capacity(1000000);
         reader.seek(SeekFrom::Start(log_position))?;
-        reader.read_until(DELIMITER, &mut temp_buffer)?;
-        match bincode::deserialize(&temp_buffer)? {
+        match bincode::deserialize_from(&mut *reader)? {
             Command::Set { key: _, value } => Ok(Some(value)),
             _ => Err(KvsError::UnexpectedCommandType),
         }
@@ -86,7 +84,7 @@ impl KvsEngine for KvStore {
         }
         self.index.remove(&key);
         bincode::serialize_into(&mut self.current_writer, &Command::Rm { key })?;
-        self.current_writer.write_all(b"\n")?;
+        self.current_writer.flush()?;
         self.compact_logs()?;
         Ok(())
     }
@@ -96,19 +94,18 @@ impl KvStore {
     /// Builds index from all the log files
     fn build_index(filenames: &[PathBuf]) -> Result<HashMap<String, RefCell<LogPointer>>> {
         let mut index = HashMap::<String, RefCell<LogPointer>>::new();
-        let mut temp_buffer = Vec::with_capacity(10000000);
 
         for filename in filenames {
             let reader = KvStore::create_file_reader(filename)?;
             let mut reader_pointer = reader.borrow_mut();
             let mut log_position = reader_pointer.stream_position()?;
-            temp_buffer.clear();
-            while reader_pointer.read_until(DELIMITER, &mut temp_buffer)? > 0 {
-                match bincode::deserialize(&temp_buffer)? {
+            while let Ok(cmd) = bincode::deserialize_from(&mut *reader_pointer) {
+                match cmd {
                     Command::Set { key, value: _ } => index.insert(
                         key,
                         RefCell::new(LogPointer {
                             pos: log_position,
+                            size: reader_pointer.stream_position()? - log_position,
                             reader: Rc::clone(&reader),
                         }),
                     ),
@@ -116,7 +113,6 @@ impl KvStore {
                     _ => return Err(KvsError::UnexpectedCommandType),
                 };
                 log_position = reader_pointer.stream_position()?;
-                temp_buffer.clear();
             }
             reader_pointer.seek(SeekFrom::Start(0))?;
         }
@@ -189,27 +185,23 @@ impl KvStore {
         self.current_writer = KvStore::create_file_writer(&self.current_log)?;
         self.current_reader = KvStore::create_file_reader(&self.current_log)?;
 
-        let mut temp_buffer = String::new();
         current_path.push(KvStore::create_new_filename(LogState::Compacted)?);
         let mut comp_writer = KvStore::create_file_writer(&current_path)?;
         let mut comp_reader = KvStore::create_file_reader(&current_path)?;
 
         for log_pointer in self.index.values() {
-            temp_buffer.clear();
             let mut current_pointer = log_pointer.borrow_mut();
+            let mut buf = Vec::with_capacity(current_pointer.size as usize);
 
-            current_pointer
-                .reader
-                .borrow_mut()
-                .seek(SeekFrom::Start(current_pointer.pos))?;
-            current_pointer
-                .reader
-                .borrow_mut()
-                .read_line(&mut temp_buffer)?;
-            current_pointer.pos = comp_writer.stream_position().unwrap();
+            {
+                let mut current_reader = current_pointer.reader.borrow_mut();
+                current_reader.seek(SeekFrom::Start(current_pointer.pos))?;
+                current_reader.read_to_end(&mut buf)?;
+            }
+
+            current_pointer.pos = comp_writer.stream_position()?;
             current_pointer.reader = Rc::clone(&comp_reader);
-
-            comp_writer.write_all(temp_buffer.as_bytes())?;
+            comp_writer.write_all(&buf)?;
 
             if comp_writer.stream_position()? > COMP_THRESHOLD {
                 current_path.pop();
