@@ -59,16 +59,16 @@ fn main() -> Result<()> {
         let mut reader = BufReader::new(&stream);
         let mut writer = BufWriter::new(&stream);
 
-        let mut buffer = String::new();
-        reader.read_line(&mut buffer)?;
+        let mut buffer = Vec::new();
+        reader.read_until(b'\n', &mut buffer)?;
 
-        match serde_json::from_str(&buffer) {
+        match bincode::deserialize(&buffer) {
             Ok(cmd) => match cmd {
                 Command::Set { key, value } => {
                     match kv_store.set(key, value) {
-                        Ok(()) => serde_json::to_writer(&mut writer, &Response::Ok(None))?,
+                        Ok(()) => bincode::serialize_into(&mut writer, &Response::Ok(None))?,
                         Err(err) => {
-                            serde_json::to_writer(&mut writer, &Response::Err(format!("{}", err)))?
+                            bincode::serialize_into(&mut writer, &Response::Err(format!("{}", err)))?
                         }
                     };
                 }
@@ -76,33 +76,33 @@ fn main() -> Result<()> {
                     match kv_store.get(key) {
                         Ok(value) => match value {
                             Some(value) => {
-                                serde_json::to_writer(&mut writer, &Response::Ok(Some(value)))?
+                                bincode::serialize_into(&mut writer, &Response::Ok(Some(value)))?
                             }
-                            None => serde_json::to_writer(
+                            None => bincode::serialize_into(
                                 &mut writer,
                                 &Response::Ok(Some("Key not found".to_string())),
                             )?,
                         },
                         Err(err) => {
-                            serde_json::to_writer(&mut writer, &Response::Err(format!("{}", err)))?
+                            bincode::serialize_into(&mut writer, &Response::Err(format!("{}", err)))?
                         }
                     };
                 }
                 Command::Rm { key } => {
                     match kv_store.remove(key) {
-                        Ok(_) => serde_json::to_writer(&mut writer, &Response::Ok(None))?,
-                        Err(KvsError::KeyNotFound) => serde_json::to_writer(
+                        Ok(_) => bincode::serialize_into(&mut writer, &Response::Ok(None))?,
+                        Err(KvsError::KeyNotFound) => bincode::serialize_into(
                             &mut writer,
                             &Response::Err("Key not found".to_string()),
                         )?,
                         Err(err) => {
-                            serde_json::to_writer(&mut writer, &Response::Err(format!("{}", err)))?
+                            bincode::serialize_into(&mut writer, &Response::Err(format!("{}", err)))?
                         }
                     };
                 }
             },
             Err(err) => {
-                serde_json::to_writer(&mut writer, &Response::Err(format!("{}", err)))?;
+                bincode::serialize_into(&mut writer, &Response::Err(format!("{}", err)))?;
             }
         }
         writer.write_all(b"\n")?;
@@ -112,13 +112,13 @@ fn main() -> Result<()> {
 }
 
 fn get_current_engine(arg_engine: &Engine) -> Result<Option<Engine>> {
-    return match fs::read_to_string(ENGINE_FILENAME) {
+    return match fs::read(ENGINE_FILENAME) {
         Err(_) => {
-            fs::write(ENGINE_FILENAME, serde_json::to_string(&arg_engine)?)?;
+            fs::write(ENGINE_FILENAME, bincode::serialize(&arg_engine)?)?;
             Ok(Some(arg_engine.clone()))
         },
-        Ok(s) => {
-            let engine: Engine = serde_json::from_str(&s)?;
+        Ok(buffer) => {
+            let engine: Engine = bincode::deserialize(&buffer)?;
             Ok(Some(engine))
         }
     };

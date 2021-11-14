@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::SystemTime;
+use bincode;
 
 /// 2mb log file size, after that a new file is created
 const COMP_THRESHOLD: u64 = 2000000;
@@ -18,6 +19,7 @@ const COMP_FLAG: &str = "#";
 const WRITE_FLAG: &str = "?";
 /// Extension of a log file
 const LOG_EXT: &str = "log";
+const DELIMITER: u8 = b'\n';
 
 enum LogState {
     Write,
@@ -44,7 +46,7 @@ impl KvsEngine for KvStore {
     fn set(&mut self, key: String, value: String) -> Result<()> {
         let log_position = self.current_writer.stream_position()?;
         let set_cmd = Command::Set { key, value };
-        serde_json::to_writer(&mut self.current_writer, &set_cmd)?;
+        bincode::serialize_into(&mut self.current_writer, &set_cmd)?;
         self.current_writer.write_all(b"\n")?;
         if let Command::Set { key, value: _ } = set_cmd {
             self.index.insert(
@@ -69,10 +71,10 @@ impl KvsEngine for KvStore {
         let current_pointer = log_pointer.borrow_mut();
         let mut reader = current_pointer.reader.borrow_mut();
         let log_position = current_pointer.pos;
-        let mut temp_buffer = String::new();
+        let mut temp_buffer = Vec::with_capacity(1000000);
         reader.seek(SeekFrom::Start(log_position))?;
-        reader.read_line(&mut temp_buffer)?;
-        match serde_json::from_str(&temp_buffer)? {
+        reader.read_until(DELIMITER, &mut temp_buffer)?;
+        match bincode::deserialize(&temp_buffer)? {
             Command::Set { key: _, value } => Ok(Some(value)),
             _ => Err(KvsError::UnexpectedCommandType),
         }
@@ -83,7 +85,7 @@ impl KvsEngine for KvStore {
             return Err(KvsError::KeyNotFound);
         }
         self.index.remove(&key);
-        serde_json::to_writer(&mut self.current_writer, &Command::Rm { key })?;
+        bincode::serialize_into(&mut self.current_writer, &Command::Rm { key })?;
         self.current_writer.write_all(b"\n")?;
         self.compact_logs()?;
         Ok(())
@@ -94,15 +96,15 @@ impl KvStore {
     /// Builds index from all the log files
     fn build_index(filenames: &[PathBuf]) -> Result<HashMap<String, RefCell<LogPointer>>> {
         let mut index = HashMap::<String, RefCell<LogPointer>>::new();
-        let mut temp_buffer = String::with_capacity(100);
+        let mut temp_buffer = Vec::with_capacity(10000000);
 
         for filename in filenames {
             let reader = KvStore::create_file_reader(filename)?;
             let mut reader_pointer = reader.borrow_mut();
             let mut log_position = reader_pointer.stream_position()?;
             temp_buffer.clear();
-            while reader_pointer.read_line(&mut temp_buffer)? > 0 {
-                match serde_json::from_str(&temp_buffer)? {
+            while reader_pointer.read_until(DELIMITER, &mut temp_buffer)? > 0 {
+                match bincode::deserialize(&temp_buffer)? {
                     Command::Set { key, value: _ } => index.insert(
                         key,
                         RefCell::new(LogPointer {

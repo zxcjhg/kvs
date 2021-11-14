@@ -30,12 +30,12 @@ fn main() -> Result<()> {
     let stream = TcpStream::connect(args.address)?;
     let mut reader = BufReader::new(&stream);
     let mut writer = BufWriter::new(&stream);
-    serde_json::to_writer(&mut writer, &args.command)?;
+    bincode::serialize_into(&mut writer, &args.command)?;
     writer.write_all(b"\n")?;
     writer.flush()?;
-    let mut buffer = String::new();
-    reader.read_line(&mut buffer)?;
-    match serde_json::from_str(&buffer)? {
+    let mut buffer = Vec::new();
+    reader.read_until(b'\n', &mut buffer)?;
+    match bincode::deserialize(&buffer)? {
         Response::Ok(s) => {
             if let Some(s) = s {
                 println!("{}", s)

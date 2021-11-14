@@ -1,5 +1,5 @@
 use failure::Fail;
-use serde_json::Error;
+use bincode::Error;
 use std::io;
 use std::string::FromUtf8Error;
 
@@ -10,7 +10,7 @@ pub enum KvsError {
     #[fail(display = "Unexpected command type")]
     UnexpectedCommandType,
     #[fail(display = "Error with de/serialization  {}", _0)]
-    Serde(#[cause] serde_json::Error),
+    Bincode(#[cause] bincode::Error),
     #[fail(display = "Error with sled storage  {}", _0)]
     Sled(#[cause] sled::Error),
     #[fail(display = "Problem with IO {}", _0)]
@@ -19,9 +19,9 @@ pub enum KvsError {
     Utf8(#[cause] FromUtf8Error),
 }
 
-impl From<serde_json::Error> for KvsError {
+impl From<bincode::Error> for KvsError {
     fn from(err: Error) -> Self {
-        KvsError::Serde(err)
+        KvsError::Bincode(err)
     }
 }
 
