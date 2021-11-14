@@ -1,9 +1,9 @@
 use clap::Parser;
-use kvs::{Command, KvStore, KvsEngine, KvsError, Response, Result, SledStore, Engine};
+use kvs::{Command, Engine, KvStore, KvsEngine, KvsError, Response, Result, SledStore};
 use slog::*;
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter};
 use std::net::{SocketAddr, TcpListener};
 use std::process::exit;
 
@@ -64,9 +64,10 @@ fn main() -> Result<()> {
                 Command::Set { key, value } => {
                     match kv_store.set(key, value) {
                         Ok(()) => bincode::serialize_into(&mut writer, &Response::Ok(None))?,
-                        Err(err) => {
-                            bincode::serialize_into(&mut writer, &Response::Err(format!("{}", err)))?
-                        }
+                        Err(err) => bincode::serialize_into(
+                            &mut writer,
+                            &Response::Err(format!("{}", err)),
+                        )?,
                     };
                 }
                 Command::Get { key } => {
@@ -80,9 +81,10 @@ fn main() -> Result<()> {
                                 &Response::Ok(Some("Key not found".to_string())),
                             )?,
                         },
-                        Err(err) => {
-                            bincode::serialize_into(&mut writer, &Response::Err(format!("{}", err)))?
-                        }
+                        Err(err) => bincode::serialize_into(
+                            &mut writer,
+                            &Response::Err(format!("{}", err)),
+                        )?,
                     };
                 }
                 Command::Rm { key } => {
@@ -92,9 +94,10 @@ fn main() -> Result<()> {
                             &mut writer,
                             &Response::Err("Key not found".to_string()),
                         )?,
-                        Err(err) => {
-                            bincode::serialize_into(&mut writer, &Response::Err(format!("{}", err)))?
-                        }
+                        Err(err) => bincode::serialize_into(
+                            &mut writer,
+                            &Response::Err(format!("{}", err)),
+                        )?,
                     };
                 }
             },
@@ -108,14 +111,14 @@ fn main() -> Result<()> {
 }
 
 fn get_current_engine(arg_engine: &Engine) -> Result<Option<Engine>> {
-    return match fs::read(ENGINE_FILENAME) {
+    match fs::read(ENGINE_FILENAME) {
         Err(_) => {
             fs::write(ENGINE_FILENAME, bincode::serialize(&arg_engine)?)?;
             Ok(Some(arg_engine.clone()))
-        },
+        }
         Ok(buffer) => {
             let engine: Engine = bincode::deserialize(&buffer)?;
             Ok(Some(engine))
         }
-    };
+    }
 }

@@ -1,5 +1,5 @@
-use failure::Fail;
 use bincode::Error;
+use failure::Fail;
 use std::io;
 use std::string::FromUtf8Error;
 

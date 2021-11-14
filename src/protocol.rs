@@ -1,4 +1,4 @@
-use clap::{Subcommand, ArgEnum};
+use clap::{ArgEnum, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -17,7 +17,6 @@ pub enum Response {
     Ok(Option<String>),
     Err(String),
 }
-
 
 #[derive(ArgEnum, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Engine {

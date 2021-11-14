@@ -1,6 +1,6 @@
 use clap::Parser;
 use kvs::{Command, Response, Result};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::process::exit;
 

@@ -1,10 +1,9 @@
 use crate::{Command, KvsEngine, KvsError, Result};
-use bincode;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
-use std::fs::{read, File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::SystemTime;
