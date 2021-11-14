@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::common::Result;
 
 pub trait KvsEngine {
     /// Sets a `value` for a given `key`
@@ -13,8 +13,8 @@ pub trait KvsEngine {
     fn remove(&mut self, key: String) -> Result<()>;
 }
 
-mod kv;
+mod lskv;
 mod sled;
 
 pub use self::sled::SledStore;
-pub use kv::KvStore;
+pub use lskv::LogStructKVStore;

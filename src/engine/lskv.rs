@@ -1,4 +1,6 @@
-use crate::{Command, KvsEngine, KvsError, Result};
+use crate::common::{Command, Result};
+use crate::engine::KvsEngine;
+use crate::error::KvsError;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
@@ -34,14 +36,14 @@ struct LogPointer {
 /// Key Value struct
 ///
 /// @TODO create one buffer for reading
-pub struct KvStore {
+pub struct LogStructKVStore {
     current_writer: BufWriter<File>,
     index: BTreeMap<String, RefCell<LogPointer>>,
     current_reader: Rc<RefCell<BufReader<File>>>,
     current_log: PathBuf,
 }
 
-impl KvsEngine for KvStore {
+impl KvsEngine for LogStructKVStore {
     fn set(&mut self, key: String, value: String) -> Result<()> {
         let log_position = self.current_writer.stream_position()?;
         let set_cmd = Command::Set { key, value };
@@ -89,13 +91,13 @@ impl KvsEngine for KvStore {
     }
 }
 
-impl KvStore {
+impl LogStructKVStore {
     /// Builds index from all the log files
     fn build_index(filenames: &[PathBuf]) -> Result<BTreeMap<String, RefCell<LogPointer>>> {
         let mut index = BTreeMap::<String, RefCell<LogPointer>>::new();
 
         for filename in filenames {
-            let reader = KvStore::create_file_reader(filename)?;
+            let reader = LogStructKVStore::create_file_reader(filename)?;
             let mut reader_pointer = reader.borrow_mut();
             let mut log_position = reader_pointer.stream_position()?;
             while let Ok(cmd) = bincode::deserialize_from(&mut *reader_pointer) {
@@ -131,8 +133,8 @@ impl KvStore {
         Ok(format!("{}_{}.{}", flag, timestamp, LOG_EXT))
     }
 
-    pub fn open(path: &Path) -> Result<KvStore> {
-        let filenames = KvStore::get_sorted_log_files(path);
+    pub fn open(path: &Path) -> Result<LogStructKVStore> {
+        let filenames = LogStructKVStore::get_sorted_log_files(path);
         let mut current_log = PathBuf::from(path);
 
         if filenames.is_empty()
@@ -145,14 +147,14 @@ impl KvStore {
                 .unwrap()
                 .starts_with(WRITE_FLAG)
         {
-            current_log.push(KvStore::create_new_filename(LogState::Write)?);
+            current_log.push(LogStructKVStore::create_new_filename(LogState::Write)?);
         } else {
             current_log.push(filenames.last().unwrap());
         }
-        let current_writer = KvStore::create_file_writer(&current_log)?;
-        let current_reader = KvStore::create_file_reader(&current_log)?;
-        let index = KvStore::build_index(&filenames)?;
-        Ok(KvStore {
+        let current_writer = LogStructKVStore::create_file_writer(&current_log)?;
+        let current_reader = LogStructKVStore::create_file_reader(&current_log)?;
+        let index = LogStructKVStore::build_index(&filenames)?;
+        Ok(LogStructKVStore {
             current_writer,
             index,
             current_reader,
@@ -177,16 +179,16 @@ impl KvStore {
         )?;
         self.current_log.pop();
         let mut current_path = PathBuf::from(&self.current_log);
-        let log_filenames = KvStore::get_sorted_log_files(&current_path);
+        let log_filenames = LogStructKVStore::get_sorted_log_files(&current_path);
         self.current_log
-            .push(KvStore::create_new_filename(LogState::Write)?);
+            .push(LogStructKVStore::create_new_filename(LogState::Write)?);
 
-        self.current_writer = KvStore::create_file_writer(&self.current_log)?;
-        self.current_reader = KvStore::create_file_reader(&self.current_log)?;
+        self.current_writer = LogStructKVStore::create_file_writer(&self.current_log)?;
+        self.current_reader = LogStructKVStore::create_file_reader(&self.current_log)?;
 
-        current_path.push(KvStore::create_new_filename(LogState::Compacted)?);
-        let mut comp_writer = KvStore::create_file_writer(&current_path)?;
-        let mut comp_reader = KvStore::create_file_reader(&current_path)?;
+        current_path.push(LogStructKVStore::create_new_filename(LogState::Compacted)?);
+        let mut comp_writer = LogStructKVStore::create_file_writer(&current_path)?;
+        let mut comp_reader = LogStructKVStore::create_file_reader(&current_path)?;
 
         for log_pointer in self.index.values() {
             let mut current_pointer = log_pointer.borrow_mut();
@@ -204,9 +206,9 @@ impl KvStore {
 
             if comp_writer.stream_position()? > COMP_THRESHOLD {
                 current_path.pop();
-                current_path.push(KvStore::create_new_filename(LogState::Compacted)?);
-                comp_writer = KvStore::create_file_writer(&current_path)?;
-                comp_reader = KvStore::create_file_reader(&current_path)?;
+                current_path.push(LogStructKVStore::create_new_filename(LogState::Compacted)?);
+                comp_writer = LogStructKVStore::create_file_writer(&current_path)?;
+                comp_reader = LogStructKVStore::create_file_reader(&current_path)?;
             }
         }
 

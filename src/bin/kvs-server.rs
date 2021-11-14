@@ -1,5 +1,7 @@
 use clap::Parser;
-use kvs::{Command, Engine, KvStore, KvsEngine, KvsError, Response, Result, SledStore};
+use kvs::common::{Command, EngineType, Response, Result};
+use kvs::engine::*;
+use kvs::error::KvsError;
 use slog::*;
 use std::env;
 use std::fs;
@@ -28,7 +30,7 @@ struct ApplicationArguments {
         default_value = "kvs",
         about = "Engine for key value storage"
     )]
-    engine: Engine,
+    engine: EngineType,
 }
 
 fn main() -> Result<()> {
@@ -48,8 +50,8 @@ fn main() -> Result<()> {
     info!(logger, "Backend engine: {}", args.engine);
 
     let mut kv_store: Box<dyn KvsEngine> = match args.engine {
-        Engine::Kvs => Box::new(KvStore::open(env::current_dir()?.as_path())?),
-        Engine::Sled => Box::new(SledStore::open(env::current_dir()?.as_path())?),
+        EngineType::Kvs => Box::new(LogStructKVStore::open(env::current_dir()?.as_path())?),
+        EngineType::Sled => Box::new(SledStore::open(env::current_dir()?.as_path())?),
     };
 
     let listener = TcpListener::bind(args.address)?;
@@ -110,14 +112,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn get_current_engine(arg_engine: &Engine) -> Result<Option<Engine>> {
+fn get_current_engine(arg_engine: &EngineType) -> Result<Option<EngineType>> {
     match fs::read(ENGINE_FILENAME) {
         Err(_) => {
             fs::write(ENGINE_FILENAME, bincode::serialize(&arg_engine)?)?;
             Ok(Some(arg_engine.clone()))
         }
         Ok(buffer) => {
-            let engine: Engine = bincode::deserialize(&buffer)?;
+            let engine: EngineType = bincode::deserialize(&buffer)?;
             Ok(Some(engine))
         }
     }
