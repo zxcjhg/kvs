@@ -1,12 +1,12 @@
 use clap::Parser;
-use kvs::common::{Command, EngineType, Response, Result};
-use kvs::engine::*;
-use kvs::error::KvsError;
+use kvs::common::{EngineType, Result};
+use kvs::engine::{LogStructKVStore, SledStore};
+use kvs::server::KvsServer;
+use kvs::thread_pool::*;
 use slog::*;
 use std::env;
 use std::fs;
-use std::io::{BufReader, BufWriter};
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::process::exit;
 
 const ENGINE_FILENAME: &str = ".engine";
@@ -31,6 +31,23 @@ struct ApplicationArguments {
         about = "Engine for key value storage"
     )]
     engine: EngineType,
+    #[clap(
+        arg_enum,
+        short,
+        long = "thread_pool",
+        name = "thread pool",
+        default_value = "sharedq",
+        about = "Engine for key value storage"
+    )]
+    thread_pool: ThreadPoolType,
+    #[clap(
+        short = 'n',
+        long = "num_threads",
+        name = "num of threads",
+        default_value = "8",
+        about = "Num of threads"
+    )]
+    num_threads: u32,
 }
 
 fn main() -> Result<()> {
@@ -48,66 +65,42 @@ fn main() -> Result<()> {
     info!(logger, "Storage version {}", env!["CARGO_PKG_VERSION"]);
     info!(logger, "Listening on: {}", args.address);
     info!(logger, "Backend engine: {}", args.engine);
+    info!(logger, "Thread pool: {:?}", args.thread_pool);
 
-    let mut kv_store: Box<dyn KvsEngine> = match args.engine {
-        EngineType::Kvs => Box::new(LogStructKVStore::open(env::current_dir()?.as_path())?),
-        EngineType::Sled => Box::new(SledStore::open(env::current_dir()?.as_path())?),
-    };
-
-    let listener = TcpListener::bind(args.address)?;
-
-    for stream in listener.incoming() {
-        let stream = stream?;
-        let mut reader = BufReader::new(&stream);
-        let mut writer = BufWriter::new(&stream);
-
-        match bincode::deserialize_from(&mut reader) {
-            Ok(cmd) => match cmd {
-                Command::Set { key, value } => {
-                    match kv_store.set(key, value) {
-                        Ok(()) => bincode::serialize_into(&mut writer, &Response::Ok(None))?,
-                        Err(err) => bincode::serialize_into(
-                            &mut writer,
-                            &Response::Err(format!("{}", err)),
-                        )?,
-                    };
+    match args.engine {
+        EngineType::Kvs => {
+            let kv_store = LogStructKVStore::open(env::current_dir()?.as_path())?;
+            match args.thread_pool {
+                ThreadPoolType::Rayon => KvsServer::<LogStructKVStore, RayonThreadPool>::new(
+                    kv_store,
+                    RayonThreadPool::new(args.num_threads as u32)?,
+                )?
+                .run(&args.address)?,
+                ThreadPoolType::SharedQ => {
+                    KvsServer::<LogStructKVStore, SharedQueueThreadPool>::new(
+                        kv_store,
+                        SharedQueueThreadPool::new(args.num_threads as u32)?,
+                    )?
+                    .run(&args.address)?
                 }
-                Command::Get { key } => {
-                    match kv_store.get(key) {
-                        Ok(value) => match value {
-                            Some(value) => {
-                                bincode::serialize_into(&mut writer, &Response::Ok(Some(value)))?
-                            }
-                            None => bincode::serialize_into(
-                                &mut writer,
-                                &Response::Ok(Some("Key not found".to_string())),
-                            )?,
-                        },
-                        Err(err) => bincode::serialize_into(
-                            &mut writer,
-                            &Response::Err(format!("{}", err)),
-                        )?,
-                    };
-                }
-                Command::Rm { key } => {
-                    match kv_store.remove(key) {
-                        Ok(_) => bincode::serialize_into(&mut writer, &Response::Ok(None))?,
-                        Err(KvsError::KeyNotFound) => bincode::serialize_into(
-                            &mut writer,
-                            &Response::Err("Key not found".to_string()),
-                        )?,
-                        Err(err) => bincode::serialize_into(
-                            &mut writer,
-                            &Response::Err(format!("{}", err)),
-                        )?,
-                    };
-                }
-            },
-            Err(err) => {
-                bincode::serialize_into(&mut writer, &Response::Err(format!("{}", err)))?;
             }
         }
-    }
+        EngineType::Sled => {
+            let kv_store = SledStore::open(env::current_dir()?.as_path())?;
+            match args.thread_pool {
+                ThreadPoolType::Rayon => KvsServer::<SledStore, RayonThreadPool>::new(
+                    kv_store,
+                    RayonThreadPool::new(args.num_threads as u32)?,
+                )?
+                .run(&args.address)?,
+                ThreadPoolType::SharedQ => KvsServer::<SledStore, SharedQueueThreadPool>::new(
+                    kv_store,
+                    SharedQueueThreadPool::new(args.num_threads as u32)?,
+                )?
+                .run(&args.address)?,
+            }
+        }
+    };
 
     Ok(())
 }

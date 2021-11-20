@@ -4,6 +4,7 @@ use crate::error::KvsError;
 
 use std::path::Path;
 
+#[derive(Clone)]
 pub struct SledStore {
     db: sled::Db,
 }
@@ -17,13 +18,13 @@ impl SledStore {
 }
 
 impl KvsEngine for SledStore {
-    fn set(&mut self, key: String, value: String) -> Result<()> {
+    fn set(&self, key: String, value: String) -> Result<()> {
         self.db.insert(key, value.as_bytes().to_vec())?;
         self.db.flush()?;
         Ok(())
     }
 
-    fn get(&mut self, key: String) -> Result<Option<String>> {
+    fn get(&self, key: String) -> Result<Option<String>> {
         let value = self.db.get(&key)?;
         match value {
             Some(v) => Ok(Some(String::from_utf8(v.to_vec())?)),
@@ -31,7 +32,7 @@ impl KvsEngine for SledStore {
         }
     }
 
-    fn remove(&mut self, key: String) -> Result<()> {
+    fn remove(&self, key: String) -> Result<()> {
         self.db.remove(key)?.ok_or(KvsError::KeyNotFound)?;
         self.db.flush()?;
         Ok(())

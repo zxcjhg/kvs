@@ -1,8 +1,7 @@
 use clap::Parser;
-use kvs::common::{Command, Response, Result};
-use std::io::{BufReader, BufWriter, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::process::exit;
+use kvs::client::KvsClient;
+use kvs::common::{Command, Result};
+use std::net::SocketAddr;
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -26,22 +25,8 @@ struct ApplicationArguments {
 
 fn main() -> Result<()> {
     let args = ApplicationArguments::parse();
-
-    let stream = TcpStream::connect(args.address)?;
-    let mut reader = BufReader::new(&stream);
-    let mut writer = BufWriter::new(&stream);
-    bincode::serialize_into(&mut writer, &args.command)?;
-    writer.flush()?;
-    match bincode::deserialize_from(&mut reader)? {
-        Response::Ok(s) => {
-            if let Some(s) = s {
-                println!("{}", s)
-            }
-        }
-        Response::Err(s) => {
-            eprintln!("{}", s);
-            exit(1);
-        }
-    }
+    let mut client = KvsClient::new(&args.address)?;
+    client.send(&args.command)?;
+    client.shutdown()?;
     Ok(())
 }

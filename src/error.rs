@@ -5,10 +5,14 @@ use std::string::FromUtf8Error;
 
 #[derive(Fail, Debug)]
 pub enum KvsError {
+    #[fail(display = "Unexpected error")]
+    UnexpectedError,
     #[fail(display = "Key Not Found")]
     KeyNotFound,
     #[fail(display = "Unexpected command type")]
     UnexpectedCommandType,
+    #[fail(display = "Bad log file")]
+    BadLogFile,
     #[fail(display = "Error with de/serialization  {}", _0)]
     Bincode(#[cause] bincode::Error),
     #[fail(display = "Error with sled storage  {}", _0)]
@@ -42,3 +46,4 @@ impl From<FromUtf8Error> for KvsError {
         KvsError::Utf8(err)
     }
 }
+
