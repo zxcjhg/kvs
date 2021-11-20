@@ -4,11 +4,11 @@ use clap::ArgEnum;
 use serde::{Deserialize, Serialize};
 
 mod naive_tp;
-mod sharedq_tp;
 mod rayon_tp;
+mod sharedq_tp;
 pub use naive_tp::NaiveThreadPool;
-pub use sharedq_tp::SharedQueueThreadPool;
 pub use rayon_tp::RayonThreadPool;
+pub use sharedq_tp::SharedQueueThreadPool;
 
 pub trait ThreadPool {
     fn new(num_threads: u32) -> Result<Self>

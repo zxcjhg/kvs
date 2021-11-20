@@ -1,12 +1,11 @@
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use kvs::common::{Result, EngineType};
+use kvs::common::{EngineType, Result};
 use kvs::engine::*;
 use rand::distributions::Alphanumeric;
 use rand::prelude::*;
 use rand_pcg::Pcg64;
 use std::path::PathBuf;
 use tempfile::TempDir;
-
 
 #[derive(Clone)]
 struct EngineHolder {
@@ -49,8 +48,6 @@ fn generate_random_string(seed: u64) -> String {
 
     return s;
 }
-
-
 
 fn set_bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("set_bench");

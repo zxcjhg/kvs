@@ -1,5 +1,5 @@
-use crate::thread_pool::ThreadPool;
 use crate::common::Result;
+use crate::thread_pool::ThreadPool;
 
 pub struct RayonThreadPool {
     rayon: rayon::ThreadPool,

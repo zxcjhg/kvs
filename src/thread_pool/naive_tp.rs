@@ -1,5 +1,5 @@
-use crate::thread_pool::ThreadPool;
 use crate::common::Result;
+use crate::thread_pool::ThreadPool;
 use std::thread;
 
 pub struct NaiveThreadPool {}
@@ -9,7 +9,7 @@ impl ThreadPool for NaiveThreadPool {
     where
         Self: Sized,
     {
-        Ok(NaiveThreadPool{})
+        Ok(NaiveThreadPool {})
     }
 
     fn spawn<F>(&self, job: F)

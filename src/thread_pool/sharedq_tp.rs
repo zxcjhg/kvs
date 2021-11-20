@@ -5,7 +5,7 @@ use crossbeam_channel::unbounded;
 use std::thread;
 pub struct SharedQueueThreadPool {
     sender: crossbeam_channel::Sender<Message>,
-    num_threads: u32
+    num_threads: u32,
 }
 
 type Task = Box<dyn FnOnce() + Send + 'static>;
@@ -17,18 +17,13 @@ enum Message {
 
 #[derive(Clone)]
 struct TaskHandler {
-    receiver: crossbeam_channel::Receiver<Message>
+    receiver: crossbeam_channel::Receiver<Message>,
 }
 
 impl TaskHandler {
     fn run(&mut self) {
-        loop {
-            match self.receiver.recv().unwrap() {
-                Message::Task(task) => {
-                    task();
-                }
-                Message::Shutdown => break,
-            }
+        while let Message::Task(task) = self.receiver.recv().unwrap() {
+            task();
         }
     }
 }
@@ -56,7 +51,10 @@ impl ThreadPool for SharedQueueThreadPool {
             };
             thread::spawn(move || th.run());
         }
-        Ok(SharedQueueThreadPool { num_threads, sender })
+        Ok(SharedQueueThreadPool {
+            num_threads,
+            sender,
+        })
     }
 
     fn spawn<F>(&self, job: F)

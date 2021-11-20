@@ -32,17 +32,14 @@ where
         listener
             .set_nonblocking(true)
             .expect("Cannot set non-blocking");
-        let mut id = 0;
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
                     let kv_store = self.engine.clone();
                     let shutdown_flag = Arc::clone(&self.shutdown_flag);
-                    let i = id.clone();
                     self.pool.spawn(move || {
-                        handle_stream(i,kv_store, stream, shutdown_flag);
+                        handle_stream(kv_store, stream, shutdown_flag).unwrap();
                     });
-                    id += 1;
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     if self.shutdown_flag.load(Ordering::Relaxed) {
@@ -51,7 +48,7 @@ where
                     continue;
                 }
                 // @TODO logging
-                Err(e) => continue,
+                Err(_) => continue,
             };
         }
         println!("Shutting down");
@@ -64,7 +61,6 @@ where
 }
 
 fn handle_stream<E: KvsEngine>(
-    id: i32,
     kv_store: E,
     stream: TcpStream,
     shutdown_flag: Arc<AtomicBool>,
@@ -74,7 +70,6 @@ fn handle_stream<E: KvsEngine>(
 
     while !shutdown_flag.load(Ordering::Relaxed) {
         match bincode::deserialize_from(&mut reader) {
-
             Ok(cmd) => match cmd {
                 Command::Set { key, value } => match kv_store.set(key, value) {
                     Ok(()) => bincode::serialize_into(&mut writer, &Response::Ok(None)).unwrap(),

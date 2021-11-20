@@ -46,4 +46,3 @@ impl From<FromUtf8Error> for KvsError {
         KvsError::Utf8(err)
     }
 }
-

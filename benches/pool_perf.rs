@@ -1,5 +1,5 @@
 use assert_cmd::prelude::*;
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, black_box};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use kvs::client::KvsClient;
 use std::process;
 
@@ -52,7 +52,6 @@ fn pool_set(c: &mut Criterion) {
             BenchmarkId::from_parameter(format!("Num cpus: #{}", i)),
             |b| {
                 b.iter(black_box(|| {
-
                     for i in 0..keys.len() {
                         let key = keys.pop().unwrap();
                         let value = values.pop().unwrap();

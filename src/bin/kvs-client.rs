@@ -25,7 +25,7 @@ struct ApplicationArguments {
 
 fn main() -> Result<()> {
     let args = ApplicationArguments::parse();
-    let mut client = KvsClient::new(&args.address)?;
+    let client = KvsClient::new(&args.address)?;
     client.send(&args.command)?;
     client.shutdown()?;
     Ok(())

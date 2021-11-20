@@ -45,7 +45,7 @@ pub struct LogStructKVStore {
     log_writer: Arc<RwLock<BufWriter<File>>>,
     index: Arc<RwLock<HashMap<String, LogPointer>>>,
     path: Arc<PathBuf>,
-    log: Arc<RwLock<String>>
+    log: Arc<RwLock<String>>,
 }
 
 impl KvsEngine for LogStructKVStore {
@@ -93,11 +93,10 @@ impl KvsEngine for LogStructKVStore {
     }
 
     fn remove(&self, key: String) -> Result<()> {
-        {
-            if !self.index.read().unwrap().contains_key(&key) {
-                return Err(KvsError::KeyNotFound);
-            }
-        };
+        if !self.index.read().unwrap().contains_key(&key) {
+            return Err(KvsError::KeyNotFound);
+        }
+
         let pos = {
             let mut log_writer = self.log_writer.write().unwrap();
             self.index.write().unwrap().remove(&key);
@@ -117,7 +116,7 @@ impl LogStructKVStore {
         let filenames = get_sorted_log_files(path);
         let current_folder = PathBuf::from(path);
 
-        let     log_filename = if filenames.is_empty() {
+        let log_filename = if filenames.is_empty() {
             current_folder.join(create_new_filename(LogState::Write)?)
         } else {
             filenames.last().unwrap().to_path_buf()
@@ -142,7 +141,7 @@ impl LogStructKVStore {
 
     fn compact_logs(&self) -> Result<()> {
         let current_folder = &self.path;
-        let old_files = get_sorted_log_files(&current_folder);
+        let old_files = get_sorted_log_files(current_folder);
 
         {
             let mut current_log = self.log.write().unwrap();
@@ -166,11 +165,10 @@ impl LogStructKVStore {
                 current_reader.seek(SeekFrom::Start(log_pointer.pos))?;
                 current_reader.read_exact(&mut buf)?;
 
-                self.index.
                 new_index.insert(
                     key.clone(),
                     LogPointer {
-                        pos: comp_writer.stream_position()?.clone(),
+                        pos: comp_writer.stream_position()?,
                         filename: comp_log.clone(),
                         size: log_pointer.size,
                     },
@@ -215,24 +213,18 @@ fn build_index(filenames: &[PathBuf]) -> Result<HashMap<String, LogPointer>> {
     for filename in filenames {
         let mut reader = create_file_reader(filename)?;
         let mut log_position = reader.stream_position()?;
-        let filename = parse_filename(&filename)?;
+        let filename = parse_filename(filename)?;
         while let Ok(cmd) = bincode::deserialize_from(&mut reader) {
             match cmd {
-                Command::Set { key, value: _ } => {
-                    index.insert(
-                        key,
-                        LogPointer {
-                            pos: log_position,
-                            size: reader.stream_position()? - log_position,
-                            filename: filename.clone(),
-                        },
-                    );
-                    continue;
-                }
-                Command::Rm { key } => {
-                    index.remove(&key);
-                    continue;
-                }
+                Command::Set { key, value: _ } => index.insert(
+                    key,
+                    LogPointer {
+                        pos: log_position,
+                        size: reader.stream_position()? - log_position,
+                        filename: filename.clone(),
+                    },
+                ),
+                Command::Rm { key } => index.remove(&key),
                 _ => return Err(KvsError::UnexpectedCommandType),
             };
             log_position = reader.stream_position()?;
@@ -241,7 +233,7 @@ fn build_index(filenames: &[PathBuf]) -> Result<HashMap<String, LogPointer>> {
     Ok(index)
 }
 
-fn parse_filename(path: &PathBuf) -> Result<String> {
+fn parse_filename(path: &Path) -> Result<String> {
     Ok(path.file_name().unwrap().to_str().unwrap().to_string())
 }
 /// Generates new log filename with given `state`

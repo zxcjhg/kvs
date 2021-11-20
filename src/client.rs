@@ -1,7 +1,7 @@
 use crate::common::{Command, Response, Result};
 use crate::error::KvsError;
 use std::io::{BufReader, BufWriter, Write};
-use std::net::{SocketAddr, TcpStream, Shutdown};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct KvsClient {
@@ -40,7 +40,7 @@ impl KvsClient {
         Ok(())
     }
 
-    pub fn shutdown(&self) -> Result<()>{
+    pub fn shutdown(&self) -> Result<()> {
         self.stream.shutdown(Shutdown::Both).unwrap();
         self.shutdown_flag.store(true, Ordering::Relaxed);
         Ok(())
