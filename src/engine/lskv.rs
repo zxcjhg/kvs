@@ -1,39 +1,45 @@
 use crate::common::{Command, Result};
 use crate::engine::KvsEngine;
 use crate::error::KvsError;
+use std::cmp::max;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
 
 /// Compaction threshold, initiated after `NUM` of write operations
 // const COMPACT_THRESHOLD: u64 = 10000;
 /// 2mb log file size, after that a new file is created
-const MAX_FILE_SIZE: u64 = 20000000;
+const MAX_FILE_SIZE: u64 = 2000;
 /// A flag in the log filename that is not compacted, but full
 const FULL_FLAG: &str = "!";
 /// A flag in the log filename that is compacted and full
 const COMP_FLAG: &str = "#";
 /// A flag in the log filename that is being written into
 const WRITE_FLAG: &str = "?";
+
+const LOG_WRITE: u8 = 1;
+const LOG_FULL: u8 = 2;
+const LOG_COMP: u8 = 3;
 /// Extension of a log file
 const LOG_EXT: &str = "log";
 
-#[derive(Debug, Clone)]
-enum LogState {
-    Write,
-    Full,
-    Compacted,
-}
+// #[derive(Debug, Clone)]
+// enum LogState {
+//     Write = 1,
+//     Full = 2,
+//     Compacted = 3,
+// }
 
 #[derive(Clone)]
 struct LogPointer {
-    pos: u64,
+    pos: Arc<AtomicU64>,
     size: u64,
-    filename: String,
+    log: Arc<AtomicU64>,
+    log_state: Arc<AtomicU8>,
 }
 
 /// Key Value struct
@@ -45,7 +51,9 @@ pub struct LogStructKVStore {
     log_writer: Arc<RwLock<BufWriter<File>>>,
     index: Arc<RwLock<HashMap<String, LogPointer>>>,
     path: Arc<PathBuf>,
-    log: Arc<RwLock<String>>,
+    log: Arc<AtomicU64>,
+    log_state: Arc<AtomicU8>,
+    log_counter: Arc<AtomicU64>,
 }
 
 impl KvsEngine for LogStructKVStore {
@@ -61,9 +69,10 @@ impl KvsEngine for LogStructKVStore {
                 index.insert(
                     key,
                     LogPointer {
-                        pos: log_position,
+                        pos: Arc::new(AtomicU64::new(log_position)),
                         size: log_writer.stream_position()? - log_position,
-                        filename: self.log.read().unwrap().clone(),
+                        log: Arc::new(AtomicU64::from(self.log.load(Ordering::Relaxed))),
+                        log_state: Arc::new(AtomicU8::from(self.log_state.load(Ordering::Relaxed))),
                     },
                 );
             }
@@ -84,8 +93,11 @@ impl KvsEngine for LogStructKVStore {
         }
 
         let log = index.get(&key).unwrap();
-        let mut reader = create_file_reader(&self.generate_full_log_path(&log.filename)?)?;
-        reader.seek(SeekFrom::Start(log.pos))?;
+        let mut reader = create_file_reader(&self.generate_full_log_path(
+            &log.log.load(Ordering::Relaxed),
+            &log.log_state.load(Ordering::Relaxed),
+        )?)?;
+        reader.seek(SeekFrom::Start(log.pos.load(Ordering::Relaxed)))?;
         match bincode::deserialize_from(&mut reader)? {
             Command::Set { key: _, value } => Ok(Some(value)),
             _ => Err(KvsError::UnexpectedCommandType),
@@ -116,14 +128,22 @@ impl LogStructKVStore {
         let filenames = get_sorted_log_files(path);
         let current_folder = PathBuf::from(path);
 
+        let mut log_counter = 0u64;
+        for filename in filenames.iter() {
+            let (log, _) = parse_filename(filename)?;
+            log_counter = max(log_counter, log);
+        }
+
+        let log_counter = Arc::new(AtomicU64::new(log_counter));
+
         let log_filename = if filenames.is_empty() {
-            current_folder.join(create_new_filename(LogState::Write)?)
+            current_folder.join(create_new_filename(LOG_WRITE, &log_counter)?)
         } else {
             filenames.last().unwrap().to_path_buf()
         };
 
         let log_writer = Arc::new(RwLock::new(create_file_writer(&log_filename)?));
-        let log_filename = parse_filename(&log_filename)?;
+        let (log, log_state) = parse_filename(&log_filename)?;
 
         let index = Arc::new(RwLock::new(build_index(&filenames)?));
 
@@ -131,7 +151,9 @@ impl LogStructKVStore {
             log_writer,
             index,
             path: Arc::new(current_folder),
-            log: Arc::new(RwLock::new(log_filename)),
+            log: Arc::new(AtomicU64::new(log)),
+            log_state: Arc::new(AtomicU8::from(log_state as u8)),
+            log_counter,
         })
     }
 
@@ -143,68 +165,74 @@ impl LogStructKVStore {
         let current_folder = &self.path;
         let old_files = get_sorted_log_files(current_folder);
 
-        {
-            let mut current_log = self.log.write().unwrap();
-            *current_log = create_new_filename(LogState::Write)?;
-            let mut log_writer = self.log_writer.write().unwrap();
-            *log_writer = create_file_writer(&self.generate_full_log_path(&current_log)?)?;
-        }
-        let mut new_index = HashMap::<String, LogPointer>::new();
+        let current_log = self.log_counter.fetch_add(1, Ordering::Relaxed);
+        self.log.store(current_log, Ordering::Relaxed);
 
         {
-            let mut comp_log = create_new_filename(LogState::Compacted)?;
-            let mut comp_writer = create_file_writer(&self.generate_full_log_path(&comp_log)?)?;
+            let mut log_writer = self.log_writer.write().unwrap();
+            *log_writer =
+                create_file_writer(&self.generate_full_log_path(&current_log, &LOG_WRITE)?)?;
+        }
+
+        {
+            let mut comp_log = self.log_counter.fetch_add(1, Ordering::Relaxed);
+            let mut comp_writer =
+                create_file_writer(&self.generate_full_log_path(&comp_log, &LOG_COMP)?)?;
 
             let index = self.index.read().unwrap();
             for (key, log_pointer) in index.iter() {
                 let mut buf = vec![0u8; log_pointer.size as usize];
 
-                let mut current_reader =
-                    create_file_reader(&self.generate_full_log_path(&log_pointer.filename)?)?;
+                let mut current_reader = create_file_reader(&self.generate_full_log_path(
+                    &log_pointer.log.load(Ordering::Relaxed),
+                    &log_pointer.log_state.load(Ordering::Relaxed),
+                )?)?;
 
-                current_reader.seek(SeekFrom::Start(log_pointer.pos))?;
+                current_reader.seek(SeekFrom::Start(log_pointer.pos.load(Ordering::Relaxed)))?;
                 current_reader.read_exact(&mut buf)?;
 
-                new_index.insert(
-                    key.clone(),
-                    LogPointer {
-                        pos: comp_writer.stream_position()?,
-                        filename: comp_log.clone(),
-                        size: log_pointer.size,
-                    },
-                );
+                log_pointer
+                    .pos
+                    .store(comp_writer.stream_position()?, Ordering::Relaxed);
+                log_pointer.log.store(comp_log, Ordering::Relaxed);
+                log_pointer.log_state.store(LOG_COMP, Ordering::Relaxed);
 
                 comp_writer.write_all(&buf)?;
                 if comp_writer.stream_position()? > MAX_FILE_SIZE {
-                    comp_log = create_new_filename(LogState::Compacted)?;
-                    comp_writer = create_file_writer(&self.generate_full_log_path(&comp_log)?)?;
+                    comp_log = self.log_counter.fetch_add(1, Ordering::Relaxed);
+                    comp_writer =
+                        create_file_writer(&self.generate_full_log_path(&comp_log, &LOG_COMP)?)?;
                 }
             }
         }
-        {
-            let mut index = self.index.write().unwrap();
-            *index = new_index;
-        }
-
         for filename in old_files.iter() {
             fs::remove_file(&filename)?;
         }
         Ok(())
     }
 
-    fn generate_full_log_path(&self, filename: &str) -> Result<PathBuf> {
-        Ok(self.path.join(filename))
+    fn generate_full_log_path(&self, log: &u64, log_state: &u8) -> Result<PathBuf> {
+        Ok(self
+            .path
+            .join(format!("{}{}.{}", get_state_flag(log_state), log, LOG_EXT)))
     }
 }
 
-// fn build_log_states(filenames: &[PathBuf]) -> Result<HashMap<String, LogState>> {
-//     let mut index = HashMap::<String, LogState>::new();
-//     for filename in filenames {
-//         let (state, filename) = parse_filename(&filename)?;
-//         index.insert(filename, state);
-//     }
-//     Ok(index)
-// }
+fn get_state_flag(state: &u8) -> &str {
+    match state {
+        &LOG_WRITE => WRITE_FLAG,
+        &LOG_FULL => FULL_FLAG,
+        &LOG_COMP => COMP_FLAG,
+        _ => "",
+    }
+}
+/// Generates new log filename with given `state`
+fn create_new_filename(state: u8, log_counter: &AtomicU64) -> Result<String> {
+    let file_counter = log_counter.load(Ordering::Relaxed);
+    let filename = format!("{}{}.{}", get_state_flag(&state), file_counter, LOG_EXT);
+    log_counter.store(file_counter + 1, Ordering::Relaxed);
+    Ok(filename)
+}
 
 /// Builds index from all the log files
 fn build_index(filenames: &[PathBuf]) -> Result<HashMap<String, LogPointer>> {
@@ -213,15 +241,16 @@ fn build_index(filenames: &[PathBuf]) -> Result<HashMap<String, LogPointer>> {
     for filename in filenames {
         let mut reader = create_file_reader(filename)?;
         let mut log_position = reader.stream_position()?;
-        let filename = parse_filename(filename)?;
+        let (log, log_state) = parse_filename(filename)?;
         while let Ok(cmd) = bincode::deserialize_from(&mut reader) {
             match cmd {
                 Command::Set { key, value: _ } => index.insert(
                     key,
                     LogPointer {
-                        pos: log_position,
+                        pos: Arc::new(AtomicU64::new(log_position)),
                         size: reader.stream_position()? - log_position,
-                        filename: filename.clone(),
+                        log: Arc::new(AtomicU64::new(log)),
+                        log_state: Arc::new(AtomicU8::new(log_state)),
                     },
                 ),
                 Command::Rm { key } => index.remove(&key),
@@ -233,21 +262,18 @@ fn build_index(filenames: &[PathBuf]) -> Result<HashMap<String, LogPointer>> {
     Ok(index)
 }
 
-fn parse_filename(path: &Path) -> Result<String> {
-    Ok(path.file_name().unwrap().to_str().unwrap().to_string())
-}
-/// Generates new log filename with given `state`
-fn create_new_filename(state: LogState) -> Result<String> {
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let flag = match state {
-        LogState::Write => WRITE_FLAG,
-        LogState::Full => FULL_FLAG,
-        LogState::Compacted => COMP_FLAG,
+fn parse_filename(path: &Path) -> Result<(u64, u8)> {
+    let fullname = path.file_name().unwrap().to_str().unwrap();
+    let log_state = match &fullname[0..1] {
+        WRITE_FLAG => LOG_WRITE,
+        FULL_FLAG => LOG_FULL,
+        COMP_FLAG => LOG_COMP,
+        _ => LOG_WRITE,
     };
-    Ok(format!("{}{}.{}", flag, timestamp, LOG_EXT))
+    let log_id = fullname[1..fullname.len() - LOG_EXT.len() - 1]
+        .parse::<u64>()
+        .unwrap();
+    Ok((log_id, log_state))
 }
 
 /// Created a buffered writer for a given file
