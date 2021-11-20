@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 /// Compaction threshold, initiated after `NUM` of write operations
 // const COMPACT_THRESHOLD: u64 = 10000;
 /// 2mb log file size, after that a new file is created
-const MAX_FILE_SIZE: u64 = 2000;
+const MAX_FILE_SIZE: u64 = 20000;
 /// A flag in the log filename that is not compacted, but full
 const FULL_FLAG: &str = "!";
 /// A flag in the log filename that is compacted and full
@@ -50,10 +50,9 @@ pub struct LogStructKVStore {
 
 impl KvsEngine for LogStructKVStore {
     fn set(&self, key: String, value: String) -> Result<()> {
-        let set_cmd = Command::Set { key, value };
-
         let mut log_writer = self.log_writer.lock().unwrap();
         let pos_before = log_writer.stream_position()?;
+        let set_cmd = Command::Set { key, value };
         bincode::serialize_into(&mut *log_writer, &set_cmd)?;
         log_writer.flush()?;
         let pos_after = log_writer.stream_position()?;
@@ -126,10 +125,9 @@ impl LogStructKVStore {
             log_counter = max(log_counter, log);
         }
 
-        let log_counter = Arc::new(AtomicU64::new(log_counter));
-
         let log_filename = if filenames.is_empty() {
-            current_folder.join(create_new_filename(LOG_WRITE, &log_counter)?)
+            log_counter += 1;
+            current_folder.join(format!("{}{}.{}", WRITE_FLAG, log_counter - 1, LOG_EXT))
         } else {
             filenames.last().unwrap().to_path_buf()
         };
@@ -138,6 +136,7 @@ impl LogStructKVStore {
         let (log, _) = parse_filename(&log_filename)?;
 
         let index = Arc::new(RwLock::new(build_index(&filenames)?));
+        let log_counter = Arc::new(AtomicU64::new(log_counter));
 
         Ok(LogStructKVStore {
             log_writer,
