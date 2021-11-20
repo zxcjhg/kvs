@@ -8,7 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 /// Compaction threshold, initiated after `NUM` of write operations
 // const COMPACT_THRESHOLD: u64 = 10000;
@@ -27,13 +27,6 @@ const LOG_COMP: u8 = 3;
 /// Extension of a log file
 const LOG_EXT: &str = "log";
 
-// #[derive(Debug, Clone)]
-// enum LogState {
-//     Write = 1,
-//     Full = 2,
-//     Compacted = 3,
-// }
-
 #[derive(Clone)]
 struct LogPointer {
     pos: Arc<AtomicU64>,
@@ -48,40 +41,38 @@ struct LogPointer {
 
 #[derive(Clone)]
 pub struct LogStructKVStore {
-    log_writer: Arc<RwLock<BufWriter<File>>>,
+    log_writer: Arc<Mutex<BufWriter<File>>>,
     index: Arc<RwLock<HashMap<String, LogPointer>>>,
     path: Arc<PathBuf>,
     log: Arc<AtomicU64>,
-    log_state: Arc<AtomicU8>,
     log_counter: Arc<AtomicU64>,
 }
 
 impl KvsEngine for LogStructKVStore {
     fn set(&self, key: String, value: String) -> Result<()> {
-        let pos = {
-            let mut log_writer = self.log_writer.write().unwrap();
-            let log_position = log_writer.stream_position()?;
-            let set_cmd = Command::Set { key, value };
-            bincode::serialize_into(&mut *log_writer, &set_cmd)?;
+        let set_cmd = Command::Set { key, value };
 
-            if let Command::Set { key, value: _ } = set_cmd {
-                let mut index = self.index.write().unwrap();
-                index.insert(
-                    key,
-                    LogPointer {
-                        pos: Arc::new(AtomicU64::new(log_position)),
-                        size: log_writer.stream_position()? - log_position,
-                        log: Arc::new(AtomicU64::from(self.log.load(Ordering::Relaxed))),
-                        log_state: Arc::new(AtomicU8::from(self.log_state.load(Ordering::Relaxed))),
-                    },
-                );
-            }
-            log_writer.flush()?;
-            log_writer.stream_position()?
-        };
+        let mut log_writer = self.log_writer.lock().unwrap();
+        let pos_before = log_writer.stream_position()?;
+        bincode::serialize_into(&mut *log_writer, &set_cmd)?;
+        log_writer.flush()?;
+        let pos_after = log_writer.stream_position()?;
 
-        if pos >= MAX_FILE_SIZE {
-            self.compact_logs()?;
+        if let Command::Set { key, value: _ } = set_cmd {
+            let mut index = self.index.write().unwrap();
+            index.insert(
+                key,
+                LogPointer {
+                    pos: Arc::new(AtomicU64::new(pos_before)),
+                    size: pos_after - pos_before,
+                    log: Arc::new(AtomicU64::new(self.log.load(Ordering::Relaxed))),
+                    log_state: Arc::new(AtomicU8::new(LOG_WRITE)),
+                },
+            );
+        }
+
+        if pos_after >= MAX_FILE_SIZE {
+            self.compact_logs(log_writer)?;
         }
         Ok(())
     }
@@ -108,16 +99,17 @@ impl KvsEngine for LogStructKVStore {
         if !self.index.read().unwrap().contains_key(&key) {
             return Err(KvsError::KeyNotFound);
         }
+        let cmd = Command::Rm { key };
+        let mut log_writer = self.log_writer.lock().unwrap();
+        bincode::serialize_into(&mut *log_writer, &cmd)?;
+        log_writer.flush()?;
 
-        let pos = {
-            let mut log_writer = self.log_writer.write().unwrap();
+        if let Command::Rm { key } = cmd {
             self.index.write().unwrap().remove(&key);
-            bincode::serialize_into(&mut *log_writer, &Command::Rm { key })?;
-            log_writer.flush()?;
-            log_writer.stream_position()?
-        };
-        if pos >= MAX_FILE_SIZE {
-            self.compact_logs()?;
+        }
+
+        if log_writer.stream_position()? >= MAX_FILE_SIZE {
+            self.compact_logs(log_writer)?;
         }
         Ok(())
     }
@@ -142,8 +134,8 @@ impl LogStructKVStore {
             filenames.last().unwrap().to_path_buf()
         };
 
-        let log_writer = Arc::new(RwLock::new(create_file_writer(&log_filename)?));
-        let (log, log_state) = parse_filename(&log_filename)?;
+        let log_writer = Arc::new(Mutex::new(create_file_writer(&log_filename)?));
+        let (log, _) = parse_filename(&log_filename)?;
 
         let index = Arc::new(RwLock::new(build_index(&filenames)?));
 
@@ -152,7 +144,6 @@ impl LogStructKVStore {
             index,
             path: Arc::new(current_folder),
             log: Arc::new(AtomicU64::new(log)),
-            log_state: Arc::new(AtomicU8::from(log_state as u8)),
             log_counter,
         })
     }
@@ -161,18 +152,13 @@ impl LogStructKVStore {
     /// Iterates over index and save latest commands in the newly generatd log files
     /// Redundant are removed
 
-    fn compact_logs(&self) -> Result<()> {
+    fn compact_logs(&self, mut log_writer: MutexGuard<BufWriter<File>>) -> Result<()> {
         let current_folder = &self.path;
         let old_files = get_sorted_log_files(current_folder);
 
         let current_log = self.log_counter.fetch_add(1, Ordering::Relaxed);
         self.log.store(current_log, Ordering::Relaxed);
-
-        {
-            let mut log_writer = self.log_writer.write().unwrap();
-            *log_writer =
-                create_file_writer(&self.generate_full_log_path(&current_log, &LOG_WRITE)?)?;
-        }
+        *log_writer = create_file_writer(&self.generate_full_log_path(&current_log, &LOG_WRITE)?)?;
 
         {
             let mut comp_log = self.log_counter.fetch_add(1, Ordering::Relaxed);
@@ -180,7 +166,7 @@ impl LogStructKVStore {
                 create_file_writer(&self.generate_full_log_path(&comp_log, &LOG_COMP)?)?;
 
             let index = self.index.read().unwrap();
-            for (key, log_pointer) in index.iter() {
+            for (_, log_pointer) in index.iter() {
                 let mut buf = vec![0u8; log_pointer.size as usize];
 
                 let mut current_reader = create_file_reader(&self.generate_full_log_path(
