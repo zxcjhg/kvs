@@ -10,17 +10,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
-/// Compaction threshold, initiated after `NUM` of write operations
-// const COMPACT_THRESHOLD: u64 = 10000;
-/// 2mb log file size, after that a new file is created
+/// Max log file size
 const MAX_FILE_SIZE: u64 = 20000;
+/// Size in bytes of redundant commands
+const COMPACT_THRESHOLD: u64 = 2000000;
 /// A flag in the log filename that is not compacted, but full
 const FULL_FLAG: &str = "!";
 /// A flag in the log filename that is compacted and full
 const COMP_FLAG: &str = "#";
 /// A flag in the log filename that is being written into
 const WRITE_FLAG: &str = "?";
-
+// @TODO convert to enum
 const LOG_WRITE: u8 = 1;
 const LOG_FULL: u8 = 2;
 const LOG_COMP: u8 = 3;
@@ -36,16 +36,15 @@ struct LogPointer {
 }
 
 /// Key Value struct
-///
-/// @TODO create one buffer for reading
 
 #[derive(Clone)]
 pub struct LogStructKVStore {
     log_writer: Arc<Mutex<BufWriter<File>>>,
-    index: Arc<RwLock<HashMap<String, LogPointer>>>,
+    key_dir: Arc<RwLock<HashMap<String, LogPointer>>>,
     path: Arc<PathBuf>,
     log: Arc<AtomicU64>,
     log_counter: Arc<AtomicU64>,
+    uncompacted_size: Arc<AtomicU64>,
 }
 
 impl KvsEngine for LogStructKVStore {
@@ -58,8 +57,7 @@ impl KvsEngine for LogStructKVStore {
         let pos_after = log_writer.stream_position()?;
 
         if let Command::Set { key, value: _ } = set_cmd {
-            let mut index = self.index.write().unwrap();
-            index.insert(
+            let insert_result = self.key_dir.write().unwrap().insert(
                 key,
                 LogPointer {
                     pos: Arc::new(AtomicU64::new(pos_before)),
@@ -68,26 +66,24 @@ impl KvsEngine for LogStructKVStore {
                     log_state: Arc::new(AtomicU8::new(LOG_WRITE)),
                 },
             );
+            self.update_uncompacted_size(insert_result, log_writer)?;
         }
 
-        if pos_after >= MAX_FILE_SIZE {
-            self.compact_logs(log_writer)?;
-        }
         Ok(())
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        let index = self.index.read().unwrap();
-        if !index.contains_key(&key) {
+        let key_dir = self.key_dir.read().unwrap();
+        if !key_dir.contains_key(&key) {
             return Ok(None);
         }
 
-        let log = index.get(&key).unwrap();
+        let log_pointer = key_dir.get(&key).unwrap();
         let mut reader = create_file_reader(&self.generate_full_log_path(
-            &log.log.load(Ordering::Relaxed),
-            &log.log_state.load(Ordering::Relaxed),
+            &log_pointer.log.load(Ordering::Relaxed),
+            &log_pointer.log_state.load(Ordering::Relaxed),
         )?)?;
-        reader.seek(SeekFrom::Start(log.pos.load(Ordering::Relaxed)))?;
+        reader.seek(SeekFrom::Start(log_pointer.pos.load(Ordering::Relaxed)))?;
         match bincode::deserialize_from(&mut reader)? {
             Command::Set { key: _, value } => Ok(Some(value)),
             _ => Err(KvsError::UnexpectedCommandType),
@@ -95,7 +91,7 @@ impl KvsEngine for LogStructKVStore {
     }
 
     fn remove(&self, key: String) -> Result<()> {
-        if !self.index.read().unwrap().contains_key(&key) {
+        if !self.key_dir.read().unwrap().contains_key(&key) {
             return Err(KvsError::KeyNotFound);
         }
         let cmd = Command::Rm { key };
@@ -104,12 +100,10 @@ impl KvsEngine for LogStructKVStore {
         log_writer.flush()?;
 
         if let Command::Rm { key } = cmd {
-            self.index.write().unwrap().remove(&key);
+            let remove_result = self.key_dir.write().unwrap().remove(&key);
+            self.update_uncompacted_size(remove_result, log_writer)?;
         }
 
-        if log_writer.stream_position()? >= MAX_FILE_SIZE {
-            self.compact_logs(log_writer)?;
-        }
         Ok(())
     }
 }
@@ -119,12 +113,9 @@ impl LogStructKVStore {
         let filenames = get_sorted_log_files(path);
         let current_folder = PathBuf::from(path);
 
-        let mut log_counter = 0u64;
-        for filename in filenames.iter() {
-            let (log, _) = parse_filename(filename)?;
-            log_counter = max(log_counter, log);
-        }
-
+        let (key_dir, uncompacted_size, mut log_counter) = build_key_dir(&filenames)?;
+        let key_dir = Arc::new(RwLock::new(key_dir));
+        let uncompacted_size = Arc::new(AtomicU64::new(uncompacted_size));
         let log_filename = if filenames.is_empty() {
             log_counter += 1;
             current_folder.join(format!("{}{}.{}", WRITE_FLAG, log_counter - 1, LOG_EXT))
@@ -135,37 +126,59 @@ impl LogStructKVStore {
         let log_writer = Arc::new(Mutex::new(create_file_writer(&log_filename)?));
         let (log, _) = parse_filename(&log_filename)?;
 
-        let index = Arc::new(RwLock::new(build_index(&filenames)?));
         let log_counter = Arc::new(AtomicU64::new(log_counter));
 
         Ok(LogStructKVStore {
             log_writer,
-            index,
+            key_dir,
             path: Arc::new(current_folder),
             log: Arc::new(AtomicU64::new(log)),
             log_counter,
+            uncompacted_size,
         })
     }
 
+    fn update_uncompacted_size(
+        &self,
+        old_log_pointer: Option<LogPointer>,
+        log_writer: MutexGuard<BufWriter<File>>,
+    ) -> Result<()> {
+        if let Some(old_log_pointer) = old_log_pointer {
+            let mut comp_thresh = self
+                .uncompacted_size
+                .fetch_add(old_log_pointer.size, Ordering::Relaxed);
+            comp_thresh += old_log_pointer.size;
+
+            if comp_thresh >= COMPACT_THRESHOLD {
+                self.compact_logs(log_writer)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn get_new_log(&self) -> u64 {
+        self.log_counter.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Compact logs
-    /// Iterates over index and save latest commands in the newly generatd log files
+    /// Iterates over key_dir and save latest commands in the newly generatd log files
     /// Redundant are removed
 
     fn compact_logs(&self, mut log_writer: MutexGuard<BufWriter<File>>) -> Result<()> {
         let current_folder = &self.path;
         let old_files = get_sorted_log_files(current_folder);
 
-        let current_log = self.log_counter.fetch_add(1, Ordering::Relaxed);
+        let current_log = self.get_new_log();
         self.log.store(current_log, Ordering::Relaxed);
         *log_writer = create_file_writer(&self.generate_full_log_path(&current_log, &LOG_WRITE)?)?;
 
         {
-            let mut comp_log = self.log_counter.fetch_add(1, Ordering::Relaxed);
+            let mut comp_log = self.get_new_log();
             let mut comp_writer =
                 create_file_writer(&self.generate_full_log_path(&comp_log, &LOG_COMP)?)?;
 
-            let index = self.index.read().unwrap();
-            for (_, log_pointer) in index.iter() {
+            let key_dir = self.key_dir.read().unwrap();
+            for (_, log_pointer) in key_dir.iter() {
                 let mut buf = vec![0u8; log_pointer.size as usize];
 
                 let mut current_reader = create_file_reader(&self.generate_full_log_path(
@@ -184,12 +197,13 @@ impl LogStructKVStore {
 
                 comp_writer.write_all(&buf)?;
                 if comp_writer.stream_position()? > MAX_FILE_SIZE {
-                    comp_log = self.log_counter.fetch_add(1, Ordering::Relaxed);
+                    comp_log = self.get_new_log();
                     comp_writer =
                         create_file_writer(&self.generate_full_log_path(&comp_log, &LOG_COMP)?)?;
                 }
             }
         }
+        self.uncompacted_size.store(0, Ordering::Relaxed);
         for filename in old_files.iter() {
             fs::remove_file(&filename)?;
         }
@@ -204,47 +218,51 @@ impl LogStructKVStore {
 }
 
 fn get_state_flag(state: &u8) -> &str {
-    match state {
-        &LOG_WRITE => WRITE_FLAG,
-        &LOG_FULL => FULL_FLAG,
-        &LOG_COMP => COMP_FLAG,
+    match *state {
+        LOG_WRITE => WRITE_FLAG,
+        LOG_FULL => FULL_FLAG,
+        LOG_COMP => COMP_FLAG,
         _ => "",
     }
 }
-/// Generates new log filename with given `state`
-fn create_new_filename(state: u8, log_counter: &AtomicU64) -> Result<String> {
-    let file_counter = log_counter.load(Ordering::Relaxed);
-    let filename = format!("{}{}.{}", get_state_flag(&state), file_counter, LOG_EXT);
-    log_counter.store(file_counter + 1, Ordering::Relaxed);
-    Ok(filename)
-}
 
-/// Builds index from all the log files
-fn build_index(filenames: &[PathBuf]) -> Result<HashMap<String, LogPointer>> {
-    let mut index = HashMap::<String, LogPointer>::new();
+/// Builds key_dir from all the log files
+fn build_key_dir(filenames: &[PathBuf]) -> Result<(HashMap<String, LogPointer>, u64, u64)> {
+    let mut key_dir = HashMap::<String, LogPointer>::new();
+    let mut uncompacted_size = 0u64;
+    let mut log_counter = 0u64;
 
     for filename in filenames {
         let mut reader = create_file_reader(filename)?;
         let mut log_position = reader.stream_position()?;
         let (log, log_state) = parse_filename(filename)?;
+        log_counter = max(log_counter, log);
         while let Ok(cmd) = bincode::deserialize_from(&mut reader) {
             match cmd {
-                Command::Set { key, value: _ } => index.insert(
-                    key,
-                    LogPointer {
-                        pos: Arc::new(AtomicU64::new(log_position)),
-                        size: reader.stream_position()? - log_position,
-                        log: Arc::new(AtomicU64::new(log)),
-                        log_state: Arc::new(AtomicU8::new(log_state)),
-                    },
-                ),
-                Command::Rm { key } => index.remove(&key),
+                Command::Set { key, value: _ } => {
+                    if let Some(old_log_pointer) = key_dir.insert(
+                        key,
+                        LogPointer {
+                            pos: Arc::new(AtomicU64::new(log_position)),
+                            size: reader.stream_position()? - log_position,
+                            log: Arc::new(AtomicU64::new(log)),
+                            log_state: Arc::new(AtomicU8::new(log_state)),
+                        },
+                    ) {
+                        uncompacted_size += old_log_pointer.size;
+                    }
+                }
+                Command::Rm { key } => {
+                    if let Some(old_log_pointer) = key_dir.remove(&key) {
+                        uncompacted_size += old_log_pointer.size;
+                    }
+                }
                 _ => return Err(KvsError::UnexpectedCommandType),
             };
             log_position = reader.stream_position()?;
         }
     }
-    Ok(index)
+    Ok((key_dir, uncompacted_size, log_counter))
 }
 
 fn parse_filename(path: &Path) -> Result<(u64, u8)> {

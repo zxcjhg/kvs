@@ -1,7 +1,7 @@
 use crate::common::Result;
 use crate::thread_pool::ThreadPool;
 use crossbeam_channel;
-use crossbeam_channel::unbounded;
+use crossbeam_channel::bounded;
 use std::thread;
 pub struct SharedQueueThreadPool {
     sender: crossbeam_channel::Sender<Message>,
@@ -43,7 +43,7 @@ impl ThreadPool for SharedQueueThreadPool {
     where
         Self: Sized,
     {
-        let (sender, receiver) = unbounded::<Message>();
+        let (sender, receiver) = bounded::<Message>(4 * num_threads as usize);
 
         for _ in 0..num_threads {
             let mut th = TaskHandler {
