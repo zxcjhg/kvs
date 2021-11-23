@@ -14,7 +14,8 @@ pub trait KvsEngine: Clone + Send + 'static {
 }
 
 mod lskv;
+mod olskv;
 mod sled;
-
 pub use self::sled::SledStore;
 pub use lskv::LogStructKVStore;
+pub use olskv::OptLogStructKvs;

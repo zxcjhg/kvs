@@ -2,33 +2,29 @@ use crate::common::{Command, Result};
 use crate::engine::KvsEngine;
 use crate::error::KvsError;
 use crossbeam_skiplist::map::Entry;
-use crossbeam_skiplist::SkipMap;
+use crossbeam_skiplist::{SkipMap, SkipSet};
 use std::cmp::max;
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
-/// Max log file size
-const MAX_FILE_SIZE: u64 = 20000;
 /// Size in bytes of redundant commands
 const COMPACT_THRESHOLD: u64 = 2000000;
-/// A flag in the log filename that is not compacted, but full
-const FULL_FLAG: &str = "!";
 /// A flag in the log filename that is compacted and full
 const COMP_FLAG: &str = "#";
 /// A flag in the log filename that is being written into
 const WRITE_FLAG: &str = "?";
-// @TODO convert to enum
+
 const LOG_WRITE: u8 = 1;
-const LOG_FULL: u8 = 2;
-const LOG_COMP: u8 = 3;
+const LOG_COMP: u8 = 2;
 /// Extension of a log file
 const LOG_EXT: &str = "log";
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct LogPointer {
     pos: Arc<AtomicU64>,
     size: u64,
@@ -46,60 +42,140 @@ impl LogPointer {
         })
     }
 }
-/// Key Value struct
 
+struct LogWriter {
+    writer: BufWriter<File>,
+    log: u64,
+    pos: u64,
+}
+
+impl LogWriter {
+    fn new(folder: &Path, log: u64, log_state: u8) -> Result<LogWriter> {
+        let mut writer =
+            create_file_writer(generate_full_log_path(folder, &log, &log_state)?.as_path())?;
+        Ok(LogWriter {
+            pos: writer.stream_position()?,
+            writer,
+            log,
+        })
+    }
+
+    fn write_cmd(&mut self, cmd: &Command) -> Result<u64> {
+        let pos_before = self.pos;
+        bincode::serialize_into(&mut self.writer, &cmd)?;
+        self.writer.flush()?;
+        self.pos = self.writer.stream_position()?;
+
+        Ok(self.pos - pos_before)
+    }
+
+    fn write_buf(&mut self, buf: &[u8]) -> Result<u64> {
+        let pos_before = self.pos;
+        self.writer.write_all(buf)?;
+        self.writer.flush()?;
+        self.pos = self.writer.stream_position()?;
+        Ok(self.pos - pos_before)
+    }
+}
+
+struct LogReader {
+    readers: SkipMap<u64, File>,
+    to_clean: SkipSet<u64>,
+    folder: PathBuf,
+}
+
+impl LogReader {
+    fn new(folder: PathBuf) -> Result<LogReader> {
+        Ok(LogReader {
+            folder,
+            to_clean: SkipSet::new(),
+            readers: SkipMap::new(),
+        })
+    }
+    fn read_log(&self, log_pointer: &LogPointer) -> Result<Vec<u8>> {
+        let log = log_pointer.log.load(Ordering::Relaxed);
+        let log_state = log_pointer.log_state.load(Ordering::Relaxed);
+        let size = log_pointer.size;
+        let pos = log_pointer.pos.load(Ordering::Relaxed);
+
+        let entry = self.readers.get_or_insert(
+            log,
+            File::open(generate_full_log_path(&self.folder, &log, &log_state)?)?,
+        );
+
+        let reader = entry.value();
+        let mut buf = vec![0u8; size as usize];
+        reader.read_exact_at(&mut buf, pos)?;
+        Ok(buf)
+    }
+
+    fn deserialize(&self, log_pointer: &LogPointer) -> Result<Command> {
+        Ok(bincode::deserialize(&self.read_log(log_pointer)?)?)
+    }
+
+    fn read_log_clean_after(&self, log_pointer: &LogPointer) -> Result<Vec<u8>> {
+        let log = log_pointer.log.load(Ordering::Relaxed);
+        let buf = self.read_log(log_pointer)?;
+        self.to_clean.insert(log);
+
+        Ok(buf)
+    }
+
+    fn clean_up(&self) -> Result<()> {
+        for log in self.to_clean.iter() {
+            self.readers.remove(log.value());
+        }
+        self.to_clean.clear();
+        Ok(())
+    }
+}
+
+/// Key Value Storage with Optimizations
+/// 1) Changed HashMap to SkipMap
+/// 2) Utilize pread
+/// 3) Optimize Compaction, create only one db file
+/// 4) Optimize log_pointer update with bit mask and atomics
+/// 5) Implement PBufReader
 #[derive(Clone)]
 pub struct OptLogStructKvs {
-    log_writer: Arc<Mutex<BufWriter<File>>>,
+    log_writer: Arc<Mutex<LogWriter>>,
     key_dir: Arc<SkipMap<String, LogPointer>>,
-    path: Arc<PathBuf>,
-    log: Arc<AtomicU64>,
+    folder: Arc<PathBuf>,
+    reader: Arc<LogReader>,
     log_counter: Arc<AtomicU64>,
     uncompacted_size: Arc<AtomicU64>,
+    comp_lock: Arc<Mutex<()>>,
 }
 
 impl KvsEngine for OptLogStructKvs {
     fn set(&self, key: String, value: String) -> Result<()> {
-        let mut log_writer = self.log_writer.lock().unwrap();
-        let pos_before = log_writer.stream_position()?;
-        let set_cmd = Command::Set { key, value };
-        bincode::serialize_into(&mut *log_writer, &set_cmd)?;
-        log_writer.flush()?;
-        let pos_after = log_writer.stream_position()?;
+        let cmd = Command::Set { key, value };
+        let (pos, size, log) = {
+            let mut log_writer = self.log_writer.lock().unwrap();
+            let log = log_writer.log;
+            let pos = log_writer.pos;
+            let size = log_writer.write_cmd(&cmd)?;
+            (pos, size, log)
+        };
 
-        if let Command::Set { key, value: _ } = set_cmd {
-            let old_entry = self.key_dir.get(&key);
-            self.key_dir.insert(
-                key,
-                LogPointer::new(
-                    pos_before,
-                    pos_after - pos_before,
-                    self.log.load(Ordering::Relaxed),
-                    LOG_WRITE,
-                )?,
-            );
-            self.update_uncompacted_size(old_entry, log_writer)?;
-        }
+        let key = extract_key_from_cmd(cmd);
+        let old_entry = self.key_dir.get(&key);
+        self.key_dir
+            .insert(key, LogPointer::new(pos, size, log, LOG_WRITE)?);
+        self.update_uncompacted_size(old_entry)?;
 
         Ok(())
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        let entry = self.key_dir.get(&key);
-        return if let Some(entry) = entry {
-            let log_pointer = entry.value();
-            let mut reader = create_file_reader(&self.generate_full_log_path(
-                &log_pointer.log.load(Ordering::Relaxed),
-                &log_pointer.log_state.load(Ordering::Relaxed),
-            )?)?;
-            reader.seek(SeekFrom::Start(log_pointer.pos.load(Ordering::Relaxed)))?;
-            match bincode::deserialize_from(&mut reader)? {
+        if let Some(entry) = self.key_dir.get(&key) {
+            match self.reader.deserialize(entry.value())? {
                 Command::Set { key: _, value } => Ok(Some(value)),
                 _ => Err(KvsError::UnexpectedCommandType),
             }
         } else {
             Ok(None)
-        };
+        }
     }
 
     fn remove(&self, key: String) -> Result<()> {
@@ -107,14 +183,14 @@ impl KvsEngine for OptLogStructKvs {
             return Err(KvsError::KeyNotFound);
         }
         let cmd = Command::Rm { key };
-        let mut log_writer = self.log_writer.lock().unwrap();
-        bincode::serialize_into(&mut *log_writer, &cmd)?;
-        log_writer.flush()?;
-
-        if let Command::Rm { key } = cmd {
-            let remove_result = self.key_dir.remove(&key);
-            self.update_uncompacted_size(remove_result, log_writer)?;
+        {
+            let mut log_writer = self.log_writer.lock().unwrap();
+            log_writer.write_cmd(&cmd)?;
         }
+
+        let key = extract_key_from_cmd(cmd);
+        let old_entry = self.key_dir.remove(&key);
+        self.update_uncompacted_size(old_entry)?;
 
         Ok(())
     }
@@ -125,35 +201,29 @@ impl OptLogStructKvs {
         let filenames = get_sorted_log_files(path);
         let current_folder = PathBuf::from(path);
 
-        let (key_dir, uncompacted_size, mut log_counter) = build_key_dir(&filenames)?;
+        let (key_dir, uncompacted_size, log_counter) = build_key_dir(&filenames)?;
         let key_dir = Arc::new(key_dir);
         let uncompacted_size = Arc::new(AtomicU64::new(uncompacted_size));
-        let log_filename = if filenames.is_empty() {
-            log_counter += 1;
-            current_folder.join(format!("{}{}.{}", WRITE_FLAG, log_counter - 1, LOG_EXT))
+        let log = if filenames.is_empty() {
+            log_counter
         } else {
-            filenames.last().unwrap().to_path_buf()
+            parse_filename(&filenames.last().unwrap().to_path_buf())?.0
         };
-
-        let log_writer = Arc::new(Mutex::new(create_file_writer(&log_filename)?));
-        let (log, _) = parse_filename(&log_filename)?;
-        let log_counter = Arc::new(AtomicU64::new(log_counter));
+        let log_writer = Arc::new(Mutex::new(LogWriter::new(&current_folder, log, LOG_WRITE)?));
+        let log_counter = Arc::new(AtomicU64::new(log_counter + 1));
 
         Ok(OptLogStructKvs {
+            reader: Arc::new(LogReader::new(current_folder.clone())?),
             log_writer,
             key_dir,
-            path: Arc::new(current_folder),
-            log: Arc::new(AtomicU64::new(log)),
+            folder: Arc::new(current_folder),
             log_counter,
             uncompacted_size,
+            comp_lock: Arc::new(Mutex::new(())),
         })
     }
 
-    fn update_uncompacted_size(
-        &self,
-        old_entry: Option<Entry<String, LogPointer>>,
-        log_writer: MutexGuard<BufWriter<File>>,
-    ) -> Result<()> {
+    fn update_uncompacted_size(&self, old_entry: Option<Entry<String, LogPointer>>) -> Result<()> {
         if let Some(old_entry) = old_entry {
             let old_log_pointer = old_entry.value();
             let mut comp_thresh = self
@@ -161,8 +231,9 @@ impl OptLogStructKvs {
                 .fetch_add(old_log_pointer.size, Ordering::Relaxed);
             comp_thresh += old_log_pointer.size;
 
-            if comp_thresh >= COMPACT_THRESHOLD {
-                self.compact_logs(log_writer)?;
+            if comp_thresh >= COMPACT_THRESHOLD && self.comp_lock.try_lock().is_ok() {
+                self.compact_logs()?;
+                self.uncompacted_size.store(0, Ordering::Relaxed);
             }
         }
         Ok(())
@@ -176,63 +247,43 @@ impl OptLogStructKvs {
     /// Iterates over key_dir and save latest commands in the newly generatd log files
     /// Redundant are removed
 
-    fn compact_logs(&self, mut log_writer: MutexGuard<BufWriter<File>>) -> Result<()> {
-        let current_folder = &self.path;
-        let old_files = get_sorted_log_files(current_folder);
-
-        let current_log = self.get_new_log();
-        self.log.store(current_log, Ordering::Relaxed);
-        *log_writer = create_file_writer(&self.generate_full_log_path(&current_log, &LOG_WRITE)?)?;
+    fn compact_logs(&self) -> Result<()> {
+        let old_files = get_sorted_log_files(&self.folder);
 
         {
-            let mut comp_log = self.get_new_log();
-            let mut comp_writer =
-                create_file_writer(&self.generate_full_log_path(&comp_log, &LOG_COMP)?)?;
-
-            for entry in self.key_dir.iter() {
-                let log_pointer = entry.value();
-                let mut buf = vec![0u8; log_pointer.size as usize];
-
-                let mut current_reader = create_file_reader(&self.generate_full_log_path(
-                    &log_pointer.log.load(Ordering::Relaxed),
-                    &log_pointer.log_state.load(Ordering::Relaxed),
-                )?)?;
-
-                current_reader.seek(SeekFrom::Start(log_pointer.pos.load(Ordering::Relaxed)))?;
-                current_reader.read_exact(&mut buf)?;
-
-                log_pointer
-                    .pos
-                    .store(comp_writer.stream_position()?, Ordering::Relaxed);
-                log_pointer.log.store(comp_log, Ordering::Relaxed);
-                log_pointer.log_state.store(LOG_COMP, Ordering::Relaxed);
-
-                comp_writer.write_all(&buf)?;
-                if comp_writer.stream_position()? > MAX_FILE_SIZE {
-                    comp_log = self.get_new_log();
-                    comp_writer =
-                        create_file_writer(&self.generate_full_log_path(&comp_log, &LOG_COMP)?)?;
-                }
-            }
+            let mut log_writer = self.log_writer.lock().unwrap();
+            *log_writer = LogWriter::new(&self.folder, self.get_new_log(), LOG_WRITE)?;
         }
-        self.uncompacted_size.store(0, Ordering::Relaxed);
+
+        let mut comp_log_writer = LogWriter::new(&self.folder, self.get_new_log(), LOG_COMP)?;
+
+        for entry in self.key_dir.iter() {
+            let log_pointer = entry.value();
+            let buf = self.reader.read_log_clean_after(log_pointer)?;
+            log_pointer
+                .pos
+                .store(comp_log_writer.pos, Ordering::Relaxed);
+            log_pointer
+                .log
+                .store(comp_log_writer.log, Ordering::Relaxed);
+            log_pointer.log_state.store(LOG_COMP, Ordering::Relaxed);
+
+            comp_log_writer.write_buf(&buf)?;
+        }
+        self.reader.clean_up()?;
         for filename in old_files.iter() {
             fs::remove_file(&filename)?;
         }
         Ok(())
     }
-
-    fn generate_full_log_path(&self, log: &u64, log_state: &u8) -> Result<PathBuf> {
-        Ok(self
-            .path
-            .join(format!("{}{}.{}", get_state_flag(log_state), log, LOG_EXT)))
-    }
 }
 
+fn generate_full_log_path(folder: &Path, log: &u64, log_state: &u8) -> Result<PathBuf> {
+    Ok(folder.join(format!("{}{}.{}", get_state_flag(log_state), log, LOG_EXT)))
+}
 fn get_state_flag(state: &u8) -> &str {
     match *state {
         LOG_WRITE => WRITE_FLAG,
-        LOG_FULL => FULL_FLAG,
         LOG_COMP => COMP_FLAG,
         _ => "",
     }
@@ -282,7 +333,6 @@ fn parse_filename(path: &Path) -> Result<(u64, u8)> {
     let fullname = path.file_name().unwrap().to_str().unwrap();
     let log_state = match &fullname[0..1] {
         WRITE_FLAG => LOG_WRITE,
-        FULL_FLAG => LOG_FULL,
         COMP_FLAG => LOG_COMP,
         _ => LOG_WRITE,
     };
@@ -315,4 +365,12 @@ fn get_sorted_log_files(path: &Path) -> Vec<PathBuf> {
 
     files.sort();
     files
+}
+
+fn extract_key_from_cmd(cmd: Command) -> String {
+    match cmd {
+        Command::Rm { key } => key,
+        Command::Get { key } => key,
+        Command::Set { key, value: _ } => key,
+    }
 }

@@ -22,6 +22,6 @@ impl ThreadPool for RayonThreadPool {
     where
         F: FnOnce() + Send + 'static,
     {
-        rayon::scope(|_| self.rayon.spawn(job));
+        self.rayon.spawn(job);
     }
 }
