@@ -136,13 +136,10 @@ impl KvsEngine for OptLogStructKvs {
         let cmd = Command::Set { key, value };
         let log_pointer = {
             let mut log_writer = self.log_writer.lock().unwrap();
-            let log = log_writer.log;
-            let pos = log_writer.pos;
-            let size = log_writer.write_cmd(&cmd)?;
             LogPointer {
-                pos,
-                size,
-                log,
+                pos: log_writer.pos,
+                size: log_writer.write_cmd(&cmd)?,
+                log: log_writer.log,
                 log_state: WRITE_FLAG,
             }
         };
