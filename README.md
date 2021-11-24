@@ -1,19 +1,17 @@
-## Key-Value Database in  Rust
+## Key-Value Database in  Rust similar to Bitcask
 
 
 
 **Goals**:
 
-    - To learn Rust primitives by creating a Key Value Database
+    - To learn Rust by creating a Key-Value Database
     - To learn Rust ecosystem
     - To learn Systems Programming
     - To learn about Distributed Systems
     
  **TODO**:
  
-    - Add multi-threading
+    - Add proper logging and docs
     - Add async
-    - Create a custom serialization and communication protocol
-    - Add logging
-    - Improve performance
+    - Optimize performance
     
