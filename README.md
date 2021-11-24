@@ -1,5 +1,7 @@
 ## Key-Value Database in  Rust similar to Bitcask
 
+Based on https://github.com/pingcap/talent-plan/tree/master/courses/rust/
+
 
 
 **Goals**:
