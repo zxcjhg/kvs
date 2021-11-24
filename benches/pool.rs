@@ -1,7 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use kvs::client::KvsClient;
-use std::process;
-
 use kvs::common::Command;
 use kvs::common::{EngineType, Result};
 use kvs::engine::*;
@@ -15,12 +13,12 @@ use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::process;
 use std::rc::Rc;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
-
 struct ThreadPoolHolder {
     sharedq: Option<SharedQueueThreadPool>,
     rayon: Option<rayon::ThreadPool>,
@@ -61,7 +59,7 @@ impl ThreadPoolHolder {
 
 #[derive(Clone)]
 struct EngineHolder {
-    lkvs: Option<LogStructKVStore>,
+    lkvs: Option<OptLogStructKvs>,
     sled: Option<SledStore>,
     engine_type: EngineType,
 }
@@ -70,7 +68,7 @@ impl EngineHolder {
     fn new(engine: &EngineType, path: &Path) -> Result<EngineHolder> {
         Ok(match engine {
             EngineType::Kvs => EngineHolder {
-                lkvs: Some(LogStructKVStore::open(path).unwrap()),
+                lkvs: Some(OptLogStructKvs::open(path).unwrap()),
                 sled: None,
                 engine_type: EngineType::Kvs,
             },
@@ -122,7 +120,7 @@ fn pool_set(c: &mut Criterion) {
         .measurement_time(Duration::from_millis(6000))
         .warm_up_time(Duration::from_millis(1));
 
-    for engine_type in [EngineType::Sled, EngineType::Kvs] {
+    for engine_type in [EngineType::Kvs, EngineType::Sled] {
         for pool_type in [ThreadPoolType::Rayon, ThreadPoolType::SharedQ] {
             for i in [1, 2, 4, 6, 8] {
                 let temp_dir = TempDir::new().unwrap();
@@ -166,7 +164,7 @@ fn pool_set(c: &mut Criterion) {
                                         let key = keys.pop().unwrap();
                                         let value = values.pop().unwrap();
                                         let kv_store = kv_store.clone();
-                                        x.spawn(move |_| {
+                                        pool.spawn(move || {
                                             kv_store.set(key, value).unwrap();
                                         });
                                     }
@@ -239,5 +237,5 @@ fn pool_get(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, pool_set);
+criterion_group!(benches, pool_get, pool_set);
 criterion_main!(benches);

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 #[derive(Clone)]
 struct EngineHolder {
-    lkvs: Option<LogStructKVStore>,
+    lkvs: Option<OptLogStructKvs>,
     sled: Option<SledStore>,
     engine_type: EngineType,
 }
@@ -52,11 +52,11 @@ fn generate_random_string(seed: u64) -> String {
 
 fn set_bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("set_bench");
-    for engine in [EngineType::Kvs, EngineType::Sled].iter() {
+    for engine in [EngineType::Sled, EngineType::Kvs].iter() {
         let temp_dir = TempDir::new().unwrap();
         let mut kv_store = match engine {
             EngineType::Kvs => EngineHolder {
-                lkvs: Some(LogStructKVStore::open(temp_dir.path()).unwrap()),
+                lkvs: Some(OptLogStructKvs::open(temp_dir.path()).unwrap()),
                 sled: None,
                 engine_type: EngineType::Kvs,
             },
@@ -104,7 +104,7 @@ fn get_bench(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let mut kv_store = match engine {
             EngineType::Kvs => EngineHolder {
-                lkvs: Some(LogStructKVStore::open(&temp_dir.path()).unwrap()),
+                lkvs: Some(OptLogStructKvs::open(&temp_dir.path()).unwrap()),
                 sled: None,
                 engine_type: EngineType::Kvs,
             },

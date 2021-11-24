@@ -30,5 +30,10 @@ crossbeam-utils = "0.6.5"
 panic-control = "0.1.4"
 
 [[bench]]
-name = "pool_perf"
+name = "engine"
 harness = false
+
+[[bench]]
+name = "pool"
+harness = false
+
