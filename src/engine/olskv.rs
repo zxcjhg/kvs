@@ -148,7 +148,7 @@ impl KvsEngine for OptLogStructKvs {
         let old_entry = self.key_dir.get(&key);
         if let Some(old_entry) = old_entry {
             old_entry.value().store(log_pointer);
-            self.update_uncompacted_size(&old_entry.value().load())?;
+            self.update_uncompacted_size(old_entry.value().load().size)?;
         } else {
             self.key_dir.insert(key, AtomicCell::new(log_pointer));
         }
@@ -171,14 +171,14 @@ impl KvsEngine for OptLogStructKvs {
             return Err(KvsError::KeyNotFound);
         }
         let cmd = Command::Rm { key };
-        {
+        let size = {
             let mut log_writer = self.log_writer.lock().unwrap();
-            log_writer.write_cmd(&cmd)?;
-        }
+            log_writer.write_cmd(&cmd)?
+        }; // Remove command not needed
 
         let key = extract_key_from_cmd(cmd);
         if let Some(old_entry) = self.key_dir.remove(&key) {
-            self.update_uncompacted_size(&old_entry.value().load())?;
+            self.update_uncompacted_size(old_entry.value().load().size + size)?;
         }
 
         Ok(())
@@ -218,11 +218,11 @@ impl OptLogStructKvs {
     }
     /// Monitoring the number of bytes of redundant command logs
     /// If it hits threshold, merging launches
-    fn update_uncompacted_size(&self, log_pointer: &LogPointer) -> Result<()> {
+    fn update_uncompacted_size(&self, redundant_size: u64) -> Result<()> {
         let mut comp_thresh = self
             .uncompacted_size
-            .fetch_add(log_pointer.size, Ordering::Release);
-        comp_thresh += log_pointer.size;
+            .fetch_add(redundant_size, Ordering::Release);
+        comp_thresh += redundant_size;
 
         if comp_thresh >= COMPACT_THRESHOLD && self.comp_lock.try_lock().is_ok() {
             self.compact_logs()?;
@@ -253,6 +253,7 @@ impl OptLogStructKvs {
         for entry in self.key_dir.iter() {
             let log_pointer = entry.value();
             let buf = self.reader.read_log_clean_after(&log_pointer.load())?;
+            comp_log_writer.write_buf(&buf)?;
 
             log_pointer.store(LogPointer {
                 pos: comp_log_writer.pos,
@@ -260,13 +261,12 @@ impl OptLogStructKvs {
                 log: comp_log_writer.log,
                 log_state: COMP_FLAG,
             });
-            comp_log_writer.write_buf(&buf)?;
         }
         self.reader.clean_up()?;
         for filename in old_files.iter() {
             fs::remove_file(&filename)?;
         }
-        self.uncompacted_size.store(0, Ordering::Release);
+        self.uncompacted_size.store(0, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -307,6 +307,7 @@ fn build_key_dir(
                 Command::Rm { key } => {
                     if let Some(old_entry) = key_dir.remove(&key) {
                         uncompacted_size += old_entry.value().load().size;
+                        uncompacted_size += reader.stream_position()? - log_position;
                     }
                 }
                 _ => return Err(KvsError::UnexpectedCommandType),
