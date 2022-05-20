@@ -1,2 +1,2 @@
-## Key-Value Database in  Rust based on Bitcask
+Key-Value Storage in Rust based on Bitcask
 
